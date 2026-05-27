@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Repo Knowledge</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <aside class="sidebar">
+    <div class="sidebar-header">
+      <div class="brand">repo-knowledge</div>
+      <button id="new-chat" class="btn-primary" title="Start a new chat">+ New chat</button>
+    </div>
+    <div class="tablist" id="tablist"></div>
+    <div class="sidebar-footer">
+      <div class="hint">
+        <p><b>Strict mode.</b> Each chat is grounded only in the repo you load into it. Knowledge is never shared between chats.</p>
+        <p>Up to 5 chats per session.</p>
+      </div>
+    </div>
+  </aside>
+
+  <main class="main" id="main">
+    <!-- view renders here -->
+  </main>
+
+  <template id="tpl-onboarding">
+    <div class="onboarding">
+      <div class="card">
+        <h1>Start a new repo chat</h1>
+        <p class="muted">Give me a GitHub repo or upload a code zip. I'll only answer about this repo, never general knowledge.</p>
+
+        <div class="section">
+          <h3>Option 1 · GitHub URL</h3>
+          <form data-action="github">
+            <div class="row">
+              <input class="input" type="text" name="url" placeholder="https://github.com/owner/repo" autocomplete="off" required />
+              <button class="btn-primary" type="submit">Index</button>
+            </div>
+            <div class="token-row" hidden>
+              <input class="input" type="password" name="token" placeholder="ghp_... (GitHub personal access token)" autocomplete="off" />
+              <p class="muted small">This repo looks private. Paste a token with <code>repo</code> scope. Stored only for this chat's sync, never returned by the API.</p>
+            </div>
+          </form>
+          <p class="muted small">Public repos work out of the box. A token is only requested if access is denied.</p>
+        </div>
+
+        <div class="divider"><span>or</span></div>
+
+        <div class="section">
+          <h3>Option 2 · Upload code zip</h3>
+          <label class="dropzone" data-action="upload">
+            <input type="file" accept=".zip,application/zip" hidden />
+            <div class="dz-content">
+              <div class="dz-title">Drop a .zip here or click to choose</div>
+              <div class="muted small">Max 100MB · binaries and lockfiles are skipped</div>
+            </div>
+          </label>
+        </div>
+        <div class="onb-error" hidden></div>
+      </div>
+    </div>
+  </template>
+
+  <template id="tpl-indexing">
+    <div class="onboarding">
+      <div class="card">
+        <h1>Indexing your repo</h1>
+        <p class="muted">Chunking with tree-sitter, embedding with Gemini, storing in pgvector. You can start chatting as soon as chunks appear.</p>
+        <div class="progress">
+          <div class="stat"><span>code chunks</span><b data-stat="code_chunks">0</b></div>
+          <div class="stat"><span>feature skills (PRs)</span><b data-stat="feature_skills">0</b></div>
+          <div class="stat"><span>last run</span><b data-stat="last_run">—</b></div>
+        </div>
+        <button class="btn-primary" data-action="enter-chat">Open chat</button>
+      </div>
+    </div>
+  </template>
+
+  <template id="tpl-chat">
+    <div class="chat">
+      <div class="chat-header">
+        <div class="chat-title">
+          <div class="chat-label"></div>
+          <div class="chat-sub muted small"></div>
+        </div>
+        <div class="chat-actions">
+          <button class="btn-ghost" data-action="sync" title="Trigger delta sync">Sync</button>
+          <button class="btn-ghost" data-action="status" title="Refresh status">Status</button>
+        </div>
+      </div>
+      <div class="messages"></div>
+      <div class="scope-bar">
+        <label class="scope-pill">
+          <span class="scope-pill-label">Scope to commit</span>
+          <input class="scope-input" type="text" name="commit_sha" placeholder="e.g. a1b2c3d (optional)" autocomplete="off" spellcheck="false" />
+          <button type="button" class="scope-clear" title="Clear scope" hidden>×</button>
+        </label>
+        <span class="scope-hint muted small"></span>
+      </div>
+      <form class="composer">
+        <input class="input" type="text" name="question" placeholder="Ask about this repo: how to run it, features, bugs, files, PRs..." autocomplete="off" required />
+        <button class="btn-primary" type="submit">Send</button>
+      </form>
+    </div>
+  </template>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

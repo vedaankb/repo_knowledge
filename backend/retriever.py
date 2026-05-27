@@ -1,0 +1,111 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Optional
+from uuid import UUID
+
+from .config import get_settings
+from .db import pool
+from .embeddings import embed_query
+
+
+def _vec_literal(values: list[float]) -> str:
+    return "[" + ",".join(f"{v:.7f}" for v in values) + "]"
+
+
+@dataclass
+class CodeHit:
+    file: str
+    symbol: Optional[str]
+    language: Optional[str]
+    content: str
+    start_line: Optional[int]
+    end_line: Optional[int]
+    commit_sha: Optional[str]
+    score: float
+
+
+@dataclass
+class SkillHit:
+    pr_number: int
+    title: str
+    summary: str
+    changed_files: list[str]
+    author: Optional[str]
+    merged_at: Optional[str]
+    score: float
+
+
+async def retrieve(
+    repo_id: UUID,
+    query: str,
+    *,
+    commit_sha: Optional[str] = None,
+) -> tuple[list[CodeHit], list[SkillHit]]:
+    settings = get_settings()
+    q_vec = await embed_query(query)
+    q_lit = _vec_literal(q_vec)
+
+    if commit_sha:
+        code_sql = """
+        SELECT file, symbol, language, content, start_line, end_line, commit_sha,
+               1 - (embedding <=> $2::vector) AS score
+        FROM code_chunks
+        WHERE repo_id = $1 AND commit_sha LIKE $4 || '%'
+        ORDER BY embedding <=> $2::vector
+        LIMIT $3
+        """
+    else:
+        code_sql = """
+        SELECT file, symbol, language, content, start_line, end_line, commit_sha,
+               1 - (embedding <=> $2::vector) AS score
+        FROM code_chunks
+        WHERE repo_id = $1
+        ORDER BY embedding <=> $2::vector
+        LIMIT $3
+        """
+    skill_sql = """
+    SELECT pr_number, title, summary, changed_files, author, merged_at,
+           1 - (embedding <=> $2::vector) AS score
+    FROM feature_skills
+    WHERE repo_id = $1
+    ORDER BY embedding <=> $2::vector
+    LIMIT $3
+    """
+    async with pool().acquire() as conn:
+        if commit_sha:
+            code_rows = await conn.fetch(
+                code_sql, repo_id, q_lit, settings.top_k_code, commit_sha
+            )
+        else:
+            code_rows = await conn.fetch(code_sql, repo_id, q_lit, settings.top_k_code)
+        skill_rows = await conn.fetch(skill_sql, repo_id, q_lit, settings.top_k_skills)
+
+    code = [
+        CodeHit(
+            file=r["file"],
+            symbol=r["symbol"],
+            language=r["language"],
+            content=r["content"],
+            start_line=r["start_line"],
+            end_line=r["end_line"],
+            commit_sha=r["commit_sha"],
+            score=float(r["score"]),
+        )
+        for r in code_rows
+        if float(r["score"]) >= settings.min_retrieval_score
+    ]
+    skills = [
+        SkillHit(
+            pr_number=r["pr_number"],
+            title=r["title"],
+            summary=r["summary"],
+            changed_files=list(r["changed_files"]) if r["changed_files"] else [],
+            author=r["author"],
+            merged_at=r["merged_at"].isoformat() if r["merged_at"] else None,
+            score=float(r["score"]),
+        )
+        for r in skill_rows
+        if float(r["score"]) >= settings.min_retrieval_score
+    ]
+    return code, skills

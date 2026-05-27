@@ -1,0 +1,22 @@
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    container_name: repo_knowledge_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: repoknow
+      POSTGRES_PASSWORD: repoknow
+      POSTGRES_DB: repoknow
+    ports:
+      - "5433:5432"
+    volumes:
+      - repo_knowledge_pgdata:/var/lib/postgresql/data
+      - ./scripts/init_db.sql:/docker-entrypoint-initdb.d/00_init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U repoknow -d repoknow"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  repo_knowledge_pgdata:
