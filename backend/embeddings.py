@@ -1,45 +1,69 @@
+"""Embedding via Gemini REST v1 (not v1beta).
+
+google-generativeai 0.8.x hardcodes v1beta, which does not serve
+text-embedding-004. We call the v1 REST endpoint directly with httpx so we
+are not pinned to the SDK's API version.
+"""
 from __future__ import annotations
 
 import asyncio
 from typing import Iterable
 
-import google.generativeai as genai
+import httpx
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 from .config import get_settings
 
-_configured = False
+_EMBED_BASE = "https://generativelanguage.googleapis.com/v1/models"
+
+_http: httpx.AsyncClient | None = None
 
 
-def _ensure_configured() -> None:
-    global _configured
-    if _configured:
-        return
-    settings = get_settings()
-    if not settings.gemini_api_key:
-        raise RuntimeError("GEMINI_API_KEY is not set")
-    genai.configure(api_key=settings.gemini_api_key)
-    _configured = True
+def _client() -> httpx.AsyncClient:
+    global _http
+    if _http is None or _http.is_closed:
+        _http = httpx.AsyncClient(timeout=httpx.Timeout(30.0, read=60.0))
+    return _http
+
+
+def _model_id(model: str) -> str:
+    """Strip leading 'models/' if already present, return bare id."""
+    return model.removeprefix("models/").removeprefix("tunedModels/")
 
 
 @retry(stop=stop_after_attempt(4), wait=wait_exponential(min=1, max=8))
-def _embed_one(text: str, task_type: str) -> list[float]:
-    _ensure_configured()
+async def _embed_one(text: str, task_type: str) -> list[float]:
     settings = get_settings()
-    result = genai.embed_content(
-        model=settings.gemini_embed_model,
-        content=text[:8000],
-        task_type=task_type,
-    )
-    emb = result.get("embedding") if isinstance(result, dict) else getattr(result, "embedding", None)
-    if emb is None:
-        raise RuntimeError("No embedding returned from Gemini")
-    if isinstance(emb, dict) and "values" in emb:
-        emb = emb["values"]
-    return list(emb)
+    if not settings.gemini_api_key:
+        raise RuntimeError("GEMINI_API_KEY is not set")
+
+    model_id = _model_id(settings.gemini_embed_model)
+    url = f"{_EMBED_BASE}/{model_id}:embedContent"
+    payload = {
+        "model": f"models/{model_id}",
+        "content": {"parts": [{"text": text[:8000]}]},
+        "taskType": task_type,
+        "outputDimensionality": get_settings().embedding_dim,
+    }
+    headers = {"x-goog-api-key": settings.gemini_api_key}
+
+    r = await _client().post(url, json=payload, headers=headers)
+    if r.status_code == 404:
+        raise RuntimeError(
+            f"Embedding model '{model_id}' not found on Gemini v1 API. "
+            "Check GEMINI_EMBED_MODEL in .env (e.g. text-embedding-004)."
+        )
+    r.raise_for_status()
+    data = r.json()
+    values = data.get("embedding", {}).get("values")
+    if not values:
+        raise RuntimeError(f"No embedding values in response: {data}")
+    return list(values)
 
 
-async def embed_texts(texts: Iterable[str], *, task_type: str = "RETRIEVAL_DOCUMENT") -> list[list[float]]:
+async def embed_texts(
+    texts: Iterable[str], *, task_type: str = "RETRIEVAL_DOCUMENT"
+) -> list[list[float]]:
     texts_list = list(texts)
     if not texts_list:
         return []
@@ -48,7 +72,7 @@ async def embed_texts(texts: Iterable[str], *, task_type: str = "RETRIEVAL_DOCUM
 
     async def one(t: str) -> list[float]:
         async with sem:
-            return await asyncio.to_thread(_embed_one, t, task_type)
+            return await _embed_one(t, task_type)
 
     return await asyncio.gather(*(one(t) for t in texts_list))
 
@@ -56,3 +80,10 @@ async def embed_texts(texts: Iterable[str], *, task_type: str = "RETRIEVAL_DOCUM
 async def embed_query(text: str) -> list[float]:
     [vec] = await embed_texts([text], task_type="RETRIEVAL_QUERY")
     return vec
+
+
+def _ensure_configured() -> None:
+    """Legacy shim used by chat.py — validates key is present."""
+    settings = get_settings()
+    if not settings.gemini_api_key:
+        raise RuntimeError("GEMINI_API_KEY is not set")

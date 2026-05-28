@@ -208,12 +208,71 @@ body { display: grid; grid-template-columns: 280px 1fr; height: 100vh; }
 .scope-clear:hover { color: var(--red); }
 .scope-hint { font-size: 11px; }
 
-.composer {
-  display: flex; gap: 8px; padding: 14px 18px;
+.composer-wrap {
+  position: relative;
   border-top: 1px solid var(--border); background: var(--panel);
+  padding: 10px 18px 12px;
+}
+.composer {
+  display: flex; gap: 8px;
 }
 .composer .input { flex: 1; }
 .composer .btn-primary { padding: 0 18px; border-radius: 10px; }
+.composer-input-wrap { flex: 1; position: relative; display: flex; flex-direction: column; gap: 6px; }
+.composer-tags { display: flex; flex-wrap: wrap; gap: 6px; }
+.composer-tag {
+  display: inline-flex; align-items: center; gap: 4px;
+  background: rgba(31, 111, 235, 0.16); color: #79c0ff;
+  border: 1px solid rgba(31, 111, 235, 0.35);
+  border-radius: 999px; padding: 2px 8px;
+  font-size: 11.5px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.composer-tag.plan { background: rgba(137, 87, 229, 0.18); color: #d2a8ff; border-color: rgba(137, 87, 229, 0.4); }
+.composer-tag .tag-x {
+  background: transparent; border: 0; color: inherit;
+  cursor: pointer; font-size: 12px; line-height: 1; padding: 0;
+}
+.composer-hint {
+  display: flex; justify-content: space-between; gap: 12px;
+  margin-top: 8px; font-size: 11px;
+}
+.composer-hint code {
+  background: var(--bg); padding: 1px 5px; border-radius: 3px;
+  font-size: 10.5px;
+}
+.composer-hint .hint-mode { color: var(--muted); }
+.composer-hint.plan .hint-mode { color: #d2a8ff; }
+
+.mention-popup {
+  position: absolute;
+  left: 18px; right: 18px; bottom: calc(100% - 4px);
+  background: var(--panel-2); border: 1px solid var(--border);
+  border-radius: 10px; box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+  max-height: 240px; overflow-y: auto;
+  z-index: 30;
+  padding: 6px;
+}
+.mention-popup .mention-item {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 6px 10px; border-radius: 6px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12.5px; cursor: pointer;
+}
+.mention-popup .mention-item:hover, .mention-popup .mention-item.active {
+  background: var(--accent); color: white;
+}
+.mention-popup .mention-chunks { color: var(--muted); font-size: 11px; }
+.mention-popup .mention-item.active .mention-chunks { color: rgba(255,255,255,0.85); }
+.mention-popup .mention-empty { padding: 10px; color: var(--muted); font-size: 12px; }
+.mention-popup .mention-header { padding: 4px 10px 6px; color: var(--muted); font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.6px; border-bottom: 1px solid var(--border); margin-bottom: 4px; }
+
+/* Plan mode badge on assistant messages */
+.mode-badge {
+  display: inline-block; padding: 1px 6px; border-radius: 3px;
+  font-size: 10.5px; font-weight: 600; letter-spacing: 0.4px;
+  margin-bottom: 6px; text-transform: uppercase;
+}
+.mode-badge.plan { background: rgba(137, 87, 229, 0.22); color: #d2a8ff; }
 
 .thinking { color: var(--muted); font-style: italic; }
 .thinking::after {

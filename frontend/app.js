@@ -62,7 +62,57 @@ const state = {
   chats: [],         // array of chat objects
   activeId: null,    // id of active chat
   pollTimer: null,
+  fileCache: {},     // repoId -> { files: [{file, chunks}], fetchedAt }
 };
+
+const FILE_CACHE_TTL = 60_000;
+
+async function getRepoFiles(repoId) {
+  if (!repoId) return [];
+  const cached = state.fileCache[repoId];
+  if (cached && Date.now() - cached.fetchedAt < FILE_CACHE_TTL) {
+    return cached.files;
+  }
+  try {
+    const res = await api(`/api/repos/${repoId}/files?limit=500`);
+    const files = res.files || [];
+    state.fileCache[repoId] = { files, fetchedAt: Date.now() };
+    return files;
+  } catch (e) {
+    return cached?.files || [];
+  }
+}
+
+function invalidateFileCache(repoId) {
+  if (repoId) delete state.fileCache[repoId];
+}
+
+/**
+ * Parse a raw composer string into structured request fields.
+ *   "/plan how should I @backend/main.py harden auth?" =>
+ *     { mode: "plan", filePaths: ["backend/main.py"], question: "how should I @backend/main.py harden auth?" }
+ *
+ * We INTENTIONALLY keep the @-tokens in the question so the LLM still sees
+ * them in context; we just also extract them for retrieval scoping.
+ */
+const MENTION_RE = /@([A-Za-z0-9_./\-]+)/g;
+function parseComposer(raw) {
+  const trimmed = (raw || "").trim();
+  let mode = "strict";
+  let body = trimmed;
+  if (/^\/plan\b/i.test(body)) {
+    mode = "plan";
+    body = body.replace(/^\/plan\b\s*/i, "");
+  }
+  const filePaths = [];
+  let m;
+  MENTION_RE.lastIndex = 0;
+  while ((m = MENTION_RE.exec(body)) !== null) {
+    const p = m[1].replace(/[.,;:!?)]+$/, "");
+    if (p && !filePaths.includes(p)) filePaths.push(p);
+  }
+  return { mode, filePaths, question: body.trim() };
+}
 
 function newChat() {
   return {
@@ -137,6 +187,7 @@ function closeChat(id) {
   // Uploaded zips don't need to outlive their tab.
   if (chat.repoId && chat.source === "upload") {
     fetch(`/api/repos/${chat.repoId}`, { method: "DELETE" }).catch(() => {});
+    invalidateFileCache(chat.repoId);
   }
   persist();
   renderTabs();
@@ -202,6 +253,8 @@ function renderOnboarding(main, chat) {
   const ghForm = tpl.querySelector('form[data-action="github"]');
   const tokenRow = ghForm.querySelector(".token-row");
   const tokenInput = tokenRow.querySelector('input[name="token"]');
+  tokenRow.hidden = false;
+  tokenInput.required = true;
 
   ghForm.addEventListener("submit", async (e) => {
     e.preventDefault();
@@ -209,9 +262,8 @@ function renderOnboarding(main, chat) {
     const url = ghForm.url.value.trim();
     const token = (tokenInput.value || "").trim();
     if (!url) return;
-    // Token is required only once the token field has been revealed.
-    if (!tokenRow.hidden && !token) {
-      showErr("Token is required for this private repo.");
+    if (!token) {
+      showErr("GitHub token is required.");
       tokenInput.focus();
       return;
     }
@@ -231,14 +283,10 @@ function renderOnboarding(main, chat) {
       renderMain();
     } catch (err) {
       btn.disabled = false; btn.textContent = "Index";
-      if (err.code === "auth_required") {
-        tokenRow.hidden = false;
-        tokenInput.required = true;
-        showErr(err.message || "Private repo: a GitHub access token is required.");
+      if (err.code === "auth_required" || err.code === "token_required") {
+        showErr(err.message || "GitHub access token is required.");
         setTimeout(() => tokenInput.focus(), 0);
       } else if (err.code === "invalid_token") {
-        tokenRow.hidden = false;
-        tokenInput.required = true;
         tokenInput.value = "";
         showErr(err.message || "That token didn't work. Try one with 'repo' scope.");
         setTimeout(() => tokenInput.focus(), 0);
@@ -375,20 +423,157 @@ function renderChat(main, chat) {
     renderMain();
   });
 
+  const composerWrap = tpl.querySelector(".composer-wrap");
+  const composerHint = tpl.querySelector(".composer-hint");
+  const hintModeEl = tpl.querySelector(".hint-mode");
+  const tagsEl = tpl.querySelector(".composer-tags");
+  const popup = tpl.querySelector(".mention-popup");
   const form = tpl.querySelector("form.composer");
+  const input = tpl.querySelector(".composer-input");
+
+  // Prefetch file list so the popup pops instantly on first '@'.
+  getRepoFiles(chat.repoId);
+
+  function renderTags(parsed) {
+    tagsEl.innerHTML = "";
+    if (parsed.mode === "plan") {
+      const p = document.createElement("span");
+      p.className = "composer-tag plan";
+      p.innerHTML = `/plan`;
+      tagsEl.appendChild(p);
+    }
+    for (const f of parsed.filePaths) {
+      const t = document.createElement("span");
+      t.className = "composer-tag";
+      t.innerHTML = `@${escapeHtml(f)}`;
+      tagsEl.appendChild(t);
+    }
+    composerHint.classList.toggle("plan", parsed.mode === "plan");
+    hintModeEl.textContent = parsed.mode === "plan"
+      ? "PLAN mode · repo + general knowledge + (web if available)"
+      : "Strict mode · only your repo";
+  }
+  renderTags({ mode: "strict", filePaths: [] });
+
+  /* ---- @ mention popup ---- */
+  let mention = { active: false, start: -1, query: "", items: [], cursor: 0 };
+
+  function hidePopup() {
+    mention.active = false;
+    popup.hidden = true;
+    popup.innerHTML = "";
+  }
+
+  function refreshPopupDom() {
+    if (!mention.active) return hidePopup();
+    if (mention.items.length === 0) {
+      popup.innerHTML = `
+        <div class="mention-header">Files in this repo</div>
+        <div class="mention-empty">No files matching "${escapeHtml(mention.query)}".</div>`;
+      popup.hidden = false;
+      return;
+    }
+    const rows = mention.items.slice(0, 8).map((f, i) => `
+      <div class="mention-item${i === mention.cursor ? " active" : ""}" data-idx="${i}">
+        <span class="mention-path">${escapeHtml(f.file)}</span>
+        <span class="mention-chunks">${f.chunks}</span>
+      </div>`).join("");
+    popup.innerHTML = `
+      <div class="mention-header">Files in this repo · ↑↓ to navigate, ⏎ or Tab to insert, Esc to close</div>
+      ${rows}`;
+    popup.hidden = false;
+    popup.querySelectorAll(".mention-item").forEach((el) => {
+      el.addEventListener("mousedown", (e) => {
+        // mousedown (not click) so the input doesn't blur first
+        e.preventDefault();
+        const idx = parseInt(el.dataset.idx, 10);
+        selectMention(idx);
+      });
+    });
+  }
+
+  async function maybeOpenMention() {
+    const val = input.value;
+    const cursor = input.selectionStart ?? val.length;
+    // Find the last '@' before the cursor that starts a fresh token.
+    const upto = val.slice(0, cursor);
+    const m = upto.match(/(?:^|\s)@([A-Za-z0-9_./\-]*)$/);
+    if (!m) return hidePopup();
+    mention.active = true;
+    mention.start = cursor - m[1].length - 1; // index of '@'
+    mention.query = m[1];
+    const files = await getRepoFiles(chat.repoId);
+    const q = mention.query.toLowerCase();
+    mention.items = q
+      ? files.filter((f) => f.file.toLowerCase().includes(q))
+      : files;
+    if (mention.cursor >= mention.items.length) mention.cursor = 0;
+    refreshPopupDom();
+  }
+
+  function selectMention(idx) {
+    if (!mention.active) return;
+    const item = mention.items[idx];
+    if (!item) return hidePopup();
+    const before = input.value.slice(0, mention.start);
+    const after = input.value.slice(input.selectionStart ?? input.value.length);
+    const insert = "@" + item.file + " ";
+    input.value = before + insert + after;
+    const newPos = (before + insert).length;
+    input.setSelectionRange(newPos, newPos);
+    hidePopup();
+    renderTags(parseComposer(input.value));
+    input.focus();
+  }
+
+  input.addEventListener("input", () => {
+    renderTags(parseComposer(input.value));
+    maybeOpenMention();
+  });
+  input.addEventListener("keydown", (e) => {
+    if (mention.active && !popup.hidden) {
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        mention.cursor = Math.min(mention.cursor + 1, mention.items.length - 1);
+        refreshPopupDom();
+        return;
+      }
+      if (e.key === "ArrowUp") {
+        e.preventDefault();
+        mention.cursor = Math.max(mention.cursor - 1, 0);
+        refreshPopupDom();
+        return;
+      }
+      if (e.key === "Enter" || e.key === "Tab") {
+        if (mention.items.length > 0) {
+          e.preventDefault();
+          selectMention(mention.cursor);
+          return;
+        }
+      }
+      if (e.key === "Escape") {
+        e.preventDefault();
+        hidePopup();
+        return;
+      }
+    }
+  });
+  input.addEventListener("blur", () => setTimeout(hidePopup, 120));
+
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
-    const q = form.question.value.trim();
-    if (!q) return;
-    // commit the scope input even if user didn't blur the field
+    const raw = input.value;
+    const parsed = parseComposer(raw);
+    if (!parsed.question) return;
     chat.commitScope = (scopeInput.value || "").trim() || null;
     persist();
-    form.question.value = "";
-    await ask(chat, q);
+    input.value = "";
+    renderTags({ mode: "strict", filePaths: [] });
+    hidePopup();
+    await ask(chat, parsed);
   });
 
   main.appendChild(tpl);
-  // scroll to bottom
   requestAnimationFrame(() => {
     const m = $(".messages", main);
     if (m) m.scrollTop = m.scrollHeight;
@@ -399,20 +584,29 @@ function appendMessageDom(container, m) {
   const div = document.createElement("div");
   const refusal = m.role === "assistant" && m.refusal ? " refusal" : "";
   div.className = `msg ${m.role}${refusal}`;
+  const modeBadge = m.role === "assistant" && m.mode === "plan"
+    ? `<div class="mode-badge plan">plan mode</div>`
+    : "";
   if (m.role === "system") {
     div.textContent = m.content;
   } else if (m.role === "assistant" && m.previewing) {
+    const previewing = m.mode === "plan"
+      ? "Pulling repo context + general knowledge"
+      : "Reading repo context";
     const headline = m.previewSources
-      ? `Reading repo context · ${m.previewSources.code.length} code chunks, ${m.previewSources.skills.length} PR notes`
-      : "Reading repo context...";
+      ? `${previewing} · ${m.previewSources.code.length} code chunks, ${m.previewSources.skills.length} PR notes`
+      : `${previewing}...`;
     div.innerHTML = `
+      ${modeBadge}
       <div class="thinking">${escapeHtml(headline)}</div>
       ${renderPreviewHtml(m.previewSources)}
     `;
-  } else {
-    let html = `<div>${renderMarkdownish(m.content)}</div>`;
+  } else if (m.role === "assistant") {
+    let html = modeBadge + `<div>${renderMarkdownish(m.content)}</div>`;
     if (m.sources) html += renderSourcesHtml(m.sources);
     div.innerHTML = html;
+  } else {
+    div.innerHTML = `<div>${renderMarkdownish(m.content)}</div>`;
   }
   container.appendChild(div);
 }
@@ -477,14 +671,29 @@ function pushSystem(chat, msg) {
   persist();
 }
 
-async function ask(chat, question) {
+async function ask(chat, parsed) {
   if (!chat.repoId) return;
-  chat.messages.push({ role: "user", content: question, ts: Date.now() });
+  // parsed is either the legacy raw string (back-compat) or {mode, filePaths, question}
+  if (typeof parsed === "string") parsed = parseComposer(parsed);
+  const { mode, filePaths, question } = parsed;
+
+  // Surface what the user actually typed (including @files and /plan-stripped body)
+  // by reconstructing a friendly display string.
+  const displayPrefix = mode === "plan" ? "/plan " : "";
+  chat.messages.push({
+    role: "user",
+    content: displayPrefix + question,
+    ts: Date.now(),
+    mode,
+    filePaths,
+  });
   const placeholderIdx = chat.messages.push({
     role: "assistant",
     content: "",
     previewing: true,
     previewSources: null,
+    mode,
+    filePaths,
     ts: Date.now(),
   }) - 1;
   persist();
@@ -497,28 +706,34 @@ async function ask(chat, question) {
     chat_id: chat.id,
     question,
     commit_sha: chat.commitScope || null,
+    file_paths: filePaths.length ? filePaths : null,
+    mode,
   });
 
   const previewP = api("/api/chat/preview", { method: "POST", body })
     .then((p) => {
-      // If the final answer already replaced the placeholder, skip.
       const cur = chat.messages[placeholderIdx];
       if (!cur || !cur.previewing) return;
       cur.previewSources = p;
       persist();
       renderMain();
     })
-    .catch(() => { /* ignore preview failure; final answer still works */ });
+    .catch(() => { /* preview is best-effort */ });
 
   try {
     const res = await api("/api/chat", { method: "POST", body });
     const text = (res.answer || "").trim();
-    const refusal = !res.grounded || text.toLowerCase().includes("don't have enough information");
+    // Plan mode is allowed to answer with no repo context, so don't flag it as refusal.
+    const refusal =
+      mode !== "plan" &&
+      (!res.grounded || text.toLowerCase().includes("don't have enough information"));
     chat.messages[placeholderIdx] = {
       role: "assistant",
       content: text,
       sources: res.sources,
       refusal,
+      mode: res.mode || mode,
+      filePaths,
       ts: Date.now(),
     };
   } catch (e) {
@@ -526,10 +741,12 @@ async function ask(chat, question) {
       role: "assistant",
       content: `Error: ${e.message}`,
       refusal: true,
+      mode,
+      filePaths,
       ts: Date.now(),
     };
   }
-  await previewP; // settle, even though we ignore its result now
+  await previewP;
   persist();
   renderMain();
 }
@@ -571,7 +788,11 @@ function startPolling() {
       if (c.status === "indexing" || c.status === "ready" || c.status === "error") {
         const before = JSON.stringify(c.counts);
         await refreshStatus(c);
-        if (JSON.stringify(c.counts) !== before && c.id === state.activeId) needRender = true;
+        if (JSON.stringify(c.counts) !== before) {
+          // file list might have changed - bust cache so @ autocomplete refetches
+          invalidateFileCache(c.repoId);
+          if (c.id === state.activeId) needRender = true;
+        }
       }
     }
     if (needRender) renderMain();

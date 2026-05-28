@@ -131,6 +131,8 @@ class GitHubClient:
                     "page": page,
                 },
             )
+            if r.status_code == 403:
+                return  # rate-limited; caller treats as 0 PRs
             r.raise_for_status()
             items = r.json()
             if not items:

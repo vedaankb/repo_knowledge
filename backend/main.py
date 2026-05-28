@@ -81,6 +81,8 @@ class ChatRequest(BaseModel):
     chat_id: str = Field(min_length=4, max_length=80)
     question: str
     commit_sha: Optional[str] = Field(default=None, max_length=64)
+    file_paths: Optional[list[str]] = None
+    mode: str = Field(default="strict", pattern=r"^(strict|plan)$")
 
 
 @app.get("/api/health")
@@ -97,6 +99,14 @@ async def register_repo(req: RegisterRepoRequest, bg: BackgroundTasks) -> dict:
         raise HTTPException(400, str(e))
 
     user_token = (req.token or "").strip() or None
+    if not user_token:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "token_required",
+                "message": "GitHub access token is required.",
+            },
+        )
     effective_token = user_token or settings.github_token
 
     try:
@@ -157,7 +167,14 @@ async def _initial_index_task(repo_id: UUID, owner: str, name: str) -> None:
         token = await get_repo_token(repo_id) or settings.github_token
         async with GitHubClient(token=token) as gh:
             files_scanned, chunks_upserted, _ = await index_repo_initial(repo_id, gh)
-            prs_ingested = await ingest_prs(repo_id, gh, since_iso=None)
+            try:
+                prs_ingested = await ingest_prs(repo_id, gh, since_iso=None)
+            except Exception as pr_err:
+                log.warning(
+                    "PR ingestion skipped for %s/%s (will retry on next sync): %s",
+                    owner, name, pr_err,
+                )
+                prs_ingested = 0
         await finish_sync_run(
             run_id, "success",
             files_scanned=files_scanned,
@@ -252,15 +269,33 @@ async def repo_status(repo_id: UUID) -> dict:
     }
 
 
+def _normalize_chat_req(req: ChatRequest) -> tuple[str, Optional[str], Optional[list[str]], str]:
+    if not (req.question or "").strip():
+        raise HTTPException(400, "question is required")
+    commit_sha = (req.commit_sha or "").strip() or None
+    file_paths: Optional[list[str]] = None
+    if req.file_paths:
+        cleaned = [
+            p.strip().lstrip("@").lstrip("/")
+            for p in req.file_paths
+            if p and p.strip()
+        ]
+        cleaned = [p for p in cleaned if p]
+        file_paths = cleaned[:10] or None
+    mode = req.mode if req.mode in ("strict", "plan") else "strict"
+    return req.question.strip(), commit_sha, file_paths, mode
+
+
 @app.post("/api/chat")
 async def chat(req: ChatRequest) -> dict:
     repo = await get_repo_row(req.repo_id)
     if not repo:
         raise HTTPException(404, "repo not found")
-    if not (req.question or "").strip():
-        raise HTTPException(400, "question is required")
-    commit_sha = (req.commit_sha or "").strip() or None
-    return await answer(req.repo_id, req.chat_id, req.question.strip(), commit_sha=commit_sha)
+    question, commit_sha, file_paths, mode = _normalize_chat_req(req)
+    return await answer(
+        req.repo_id, req.chat_id, question,
+        commit_sha=commit_sha, file_paths=file_paths, mode=mode,
+    )
 
 
 @app.post("/api/chat/preview")
@@ -268,10 +303,44 @@ async def chat_preview(req: ChatRequest) -> dict:
     repo = await get_repo_row(req.repo_id)
     if not repo:
         raise HTTPException(404, "repo not found")
-    if not (req.question or "").strip():
-        raise HTTPException(400, "question is required")
-    commit_sha = (req.commit_sha or "").strip() or None
-    return await preview(req.repo_id, req.chat_id, req.question.strip(), commit_sha=commit_sha)
+    question, commit_sha, file_paths, mode = _normalize_chat_req(req)
+    return await preview(
+        req.repo_id, req.chat_id, question,
+        commit_sha=commit_sha, file_paths=file_paths, mode=mode,
+    )
+
+
+@app.get("/api/repos/{repo_id}/files")
+async def list_repo_files(repo_id: UUID, q: str = "", limit: int = 300) -> dict:
+    """Distinct file paths in the index, for @-mention autocomplete."""
+    limit = max(1, min(limit, 1000))
+    async with pool().acquire() as conn:
+        if q:
+            rows = await conn.fetch(
+                """SELECT file, COUNT(*) AS chunks
+                   FROM code_chunks
+                   WHERE repo_id = $1 AND file ILIKE $2
+                   GROUP BY file
+                   ORDER BY file
+                   LIMIT $3""",
+                repo_id, f"%{q}%", limit,
+            )
+        else:
+            rows = await conn.fetch(
+                """SELECT file, COUNT(*) AS chunks
+                   FROM code_chunks
+                   WHERE repo_id = $1
+                   GROUP BY file
+                   ORDER BY file
+                   LIMIT $2""",
+                repo_id, limit,
+            )
+    return {
+        "files": [
+            {"file": r["file"], "chunks": int(r["chunks"])}
+            for r in rows
+        ]
+    }
 
 
 @app.get("/api/repos/{repo_id}/commits")

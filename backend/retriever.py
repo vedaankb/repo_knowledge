@@ -41,29 +41,30 @@ async def retrieve(
     query: str,
     *,
     commit_sha: Optional[str] = None,
+    file_paths: Optional[list[str]] = None,
 ) -> tuple[list[CodeHit], list[SkillHit]]:
     settings = get_settings()
     q_vec = await embed_query(query)
     q_lit = _vec_literal(q_vec)
 
+    # Build code SQL dynamically so scopes compose cleanly.
+    code_where = ["repo_id = $1"]
+    code_params: list = [repo_id, q_lit, settings.top_k_code]
     if commit_sha:
-        code_sql = """
-        SELECT file, symbol, language, content, start_line, end_line, commit_sha,
-               1 - (embedding <=> $2::vector) AS score
-        FROM code_chunks
-        WHERE repo_id = $1 AND commit_sha LIKE $4 || '%'
-        ORDER BY embedding <=> $2::vector
-        LIMIT $3
-        """
-    else:
-        code_sql = """
-        SELECT file, symbol, language, content, start_line, end_line, commit_sha,
-               1 - (embedding <=> $2::vector) AS score
-        FROM code_chunks
-        WHERE repo_id = $1
-        ORDER BY embedding <=> $2::vector
-        LIMIT $3
-        """
+        code_params.append(commit_sha)
+        code_where.append(f"commit_sha LIKE ${len(code_params)} || '%'")
+    if file_paths:
+        code_params.append(list(file_paths))
+        code_where.append(f"file = ANY(${len(code_params)}::text[])")
+
+    code_sql = f"""
+    SELECT file, symbol, language, content, start_line, end_line, commit_sha,
+           1 - (embedding <=> $2::vector) AS score
+    FROM code_chunks
+    WHERE {' AND '.join(code_where)}
+    ORDER BY embedding <=> $2::vector
+    LIMIT $3
+    """
     skill_sql = """
     SELECT pr_number, title, summary, changed_files, author, merged_at,
            1 - (embedding <=> $2::vector) AS score
@@ -73,12 +74,7 @@ async def retrieve(
     LIMIT $3
     """
     async with pool().acquire() as conn:
-        if commit_sha:
-            code_rows = await conn.fetch(
-                code_sql, repo_id, q_lit, settings.top_k_code, commit_sha
-            )
-        else:
-            code_rows = await conn.fetch(code_sql, repo_id, q_lit, settings.top_k_code)
+        code_rows = await conn.fetch(code_sql, *code_params)
         skill_rows = await conn.fetch(skill_sql, repo_id, q_lit, settings.top_k_skills)
 
     code = [

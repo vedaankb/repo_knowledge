@@ -38,12 +38,12 @@
               <input class="input" type="text" name="url" placeholder="https://github.com/owner/repo" autocomplete="off" required />
               <button class="btn-primary" type="submit">Index</button>
             </div>
-            <div class="token-row" hidden>
-              <input class="input" type="password" name="token" placeholder="ghp_... (GitHub personal access token)" autocomplete="off" />
-              <p class="muted small">This repo looks private. Paste a token with <code>repo</code> scope. Stored only for this chat's sync, never returned by the API.</p>
+            <div class="token-row">
+              <input class="input" type="password" name="token" placeholder="ghp_... (GitHub personal access token)" autocomplete="off" required />
+              <p class="muted small">Required for all GitHub indexing. Use a token with <code>repo</code> scope. Stored only for this chat's sync, never returned by the API.</p>
             </div>
           </form>
-          <p class="muted small">Public repos work out of the box. A token is only requested if access is denied.</p>
+          <p class="muted small">Token is mandatory for all GitHub repos in this build.</p>
         </div>
 
         <div class="divider"><span>or</span></div>
@@ -99,10 +99,22 @@
         </label>
         <span class="scope-hint muted small"></span>
       </div>
-      <form class="composer">
-        <input class="input" type="text" name="question" placeholder="Ask about this repo: how to run it, features, bugs, files, PRs..." autocomplete="off" required />
-        <button class="btn-primary" type="submit">Send</button>
-      </form>
+      <div class="composer-wrap">
+        <div class="mention-popup" hidden></div>
+        <form class="composer">
+          <div class="composer-input-wrap">
+            <input class="input composer-input" type="text" name="question"
+                   placeholder="Ask about this repo. Type @ to scope to files, or start with /plan for planning mode (uses general knowledge + web)."
+                   autocomplete="off" spellcheck="false" required />
+            <div class="composer-tags"></div>
+          </div>
+          <button class="btn-primary" type="submit">Send</button>
+        </form>
+        <div class="composer-hint muted small">
+          <span class="hint-mode">Strict mode · only your repo</span>
+          <span class="hint-cmd"><code>@file</code> scopes retrieval · <code>/plan ...</code> = planning mode (repo + general knowledge + web)</span>
+        </div>
+      </div>
     </div>
   </template>
 

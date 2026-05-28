@@ -21,6 +21,28 @@ REFUSAL_TEXT = (
     "Try rephrasing, ask about a specific file/function/PR, or trigger a re-index."
 )
 
+PLAN_SYSTEM_PROMPT = """You are a planning assistant for a software project.
+
+You may combine three sources to answer:
+  1. CONTEXT chunks from the indexed repo (use first when relevant)
+  2. PRIOR conversation in this chat
+  3. Your own general programming knowledge, security best practices, and any
+     Google Search results the runtime exposes via tools
+
+GUIDELINES:
+- Lead with what you find in CONTEXT and PRIOR. Cite repo evidence as
+  [file.py:func L10-L40 @sha] or [PR #123].
+- Clearly mark additions from outside the repo with "(general knowledge)",
+  "(industry practice)", or "(web)" so the dev can see what is repo-specific
+  vs. general.
+- Be concrete: propose ordered steps, name real files/symbols from CONTEXT,
+  suggest commands.
+- For vulnerability / security / hardening questions: walk through likely
+  weaknesses given the visible code plus standard threats for that stack
+  (e.g., OWASP top 10 categories that apply here).
+- Do NOT invent files or symbols that aren't in CONTEXT; only reason about them.
+"""
+
 SYSTEM_PROMPT = """You are a strict repository-grounded assistant for a single GitHub repo.
 
 HARD RULES:
@@ -104,40 +126,102 @@ def _build_prompt(
     skills: list[SkillHit],
     history: list[dict],
     commit_sha: Optional[str] = None,
+    file_paths: Optional[list[str]] = None,
+    mode: str = "strict",
 ) -> str:
+    system = PLAN_SYSTEM_PROMPT if mode == "plan" else SYSTEM_PROMPT
     topics = extract_topics(history, cap=20)
     topics_line = ", ".join(topics) if topics else "(none yet)"
-    scope_block = (
-        f"=== ACTIVE COMMIT SCOPE ===\nUser scoped this question to commit {commit_sha}. "
-        f"Only chunks indexed at (a prefix of) this commit were retrieved.\n\n"
-        if commit_sha else ""
+
+    scope_lines: list[str] = []
+    if commit_sha:
+        scope_lines.append(
+            f"User scoped this question to commit {commit_sha}. "
+            f"Only chunks indexed at (a prefix of) this commit were retrieved."
+        )
+    if file_paths:
+        scope_lines.append(
+            "User scoped this question to specific files: "
+            + ", ".join(file_paths)
+            + ". Only chunks from these files were retrieved."
+        )
+    scope_block = ""
+    if scope_lines:
+        scope_block = "=== ACTIVE SCOPE ===\n" + "\n".join(scope_lines) + "\n\n"
+
+    mode_block = ""
+    if mode == "plan":
+        mode_block = (
+            "=== MODE: /plan ===\n"
+            "You are in PLAN mode. Combine the CONTEXT below with your general "
+            "knowledge and any web search tool the runtime provides. Mark "
+            "non-repo information clearly. Still cite real repo files/PRs with "
+            "the bracket format.\n\n"
+        )
+
+    closing = (
+        "Answer using the CONTEXT above as the primary source. You may add "
+        "general knowledge and (if available) web search results, but mark them "
+        "as such and never invent repo files or symbols."
+        if mode == "plan"
+        else (
+            "Answer using ONLY the CONTEXT above. Prior conversation and topics "
+            "are for resolving references (e.g. 'that function we looked at'); "
+            "do not invent facts that are not in CONTEXT."
+        )
     )
+
     return (
-        f"{SYSTEM_PROMPT}\n\n"
+        f"{system}\n\n"
+        f"{mode_block}"
         f"{scope_block}"
         f"=== TOPICS DISCUSSED IN THIS CHAT (rolling memory) ===\n{topics_line}\n\n"
         f"=== PRIOR CONVERSATION (this chat only, last few turns) ===\n{_format_history(history)}\n\n"
         f"=== REPO CONVENTIONS / PR NOTES ===\n{_format_skill_context(skills)}\n\n"
         f"=== CODE CONTEXT ===\n{_format_code_context(code)}\n\n"
         f"=== USER QUESTION ===\n{question}\n\n"
-        f"Answer using ONLY the CONTEXT above. Prior conversation and topics are for "
-        f"resolving references (e.g. 'that function we looked at'); do not invent "
-        f"facts that are not in CONTEXT."
+        f"{closing}"
     )
 
 
-def _gen_sync(prompt: str) -> str:
-    _ensure_configured()
+def _gen_sync(prompt: str, mode: str = "strict") -> str:
     settings = get_settings()
-    model = genai.GenerativeModel(settings.gemini_chat_model)
-    resp = model.generate_content(
-        prompt,
-        generation_config={
-            "temperature": 0.1,
-            "top_p": 0.9,
-            "max_output_tokens": 1024,
-        },
-    )
+    if not settings.gemini_api_key:
+        raise RuntimeError("GEMINI_API_KEY is not set")
+    genai.configure(api_key=settings.gemini_api_key)
+
+    generation_config = {
+        "temperature": 0.4 if mode == "plan" else 0.1,
+        "top_p": 0.9,
+        "max_output_tokens": 1536 if mode == "plan" else 1024,
+    }
+
+    # In plan mode, try to enable Google Search grounding so the model can pull
+    # current best practices / CVE info off the web. The exact tool format
+    # varies by SDK version and Gemini API tier; fall back silently if it isn't
+    # supported, so plan mode still works using just the model's own knowledge.
+    resp = None
+    if mode == "plan":
+        for tools_spec in (
+            [{"google_search_retrieval": {}}],
+            [{"google_search": {}}],
+        ):
+            try:
+                model = genai.GenerativeModel(
+                    settings.gemini_chat_model, tools=tools_spec
+                )
+                resp = model.generate_content(
+                    prompt, generation_config=generation_config
+                )
+                break
+            except Exception:
+                resp = None
+                continue
+
+    if resp is None:
+        model = genai.GenerativeModel(settings.gemini_chat_model)
+        resp = model.generate_content(prompt, generation_config=generation_config)
+
     if hasattr(resp, "text") and resp.text:
         return resp.text.strip()
     try:
@@ -226,6 +310,8 @@ async def preview(
     chat_id: str,
     question: str,
     commit_sha: Optional[str] = None,
+    file_paths: Optional[list[str]] = None,
+    mode: str = "strict",
 ) -> dict:
     """Return the top-k retrieved chunks without calling the LLM.
 
@@ -234,12 +320,16 @@ async def preview(
     """
     history = await retrieve_chat_context(chat_id, question)
     retrieval_query = build_retrieval_query(question, history)
-    code, skills = await retrieve(repo_id, retrieval_query, commit_sha=commit_sha)
+    code, skills = await retrieve(
+        repo_id, retrieval_query, commit_sha=commit_sha, file_paths=file_paths
+    )
     return {
         "code": [asdict(c) for c in code],
         "skills": [asdict(s) for s in skills],
         "history_turns_used": len(history),
         "commit_scope": commit_sha,
+        "file_scope": list(file_paths) if file_paths else [],
+        "mode": mode,
     }
 
 
@@ -248,19 +338,33 @@ async def answer(
     chat_id: str,
     question: str,
     commit_sha: Optional[str] = None,
+    file_paths: Optional[list[str]] = None,
+    mode: str = "strict",
 ) -> dict:
     history = await retrieve_chat_context(chat_id, question)
     retrieval_query = build_retrieval_query(question, history)
-    code, skills = await retrieve(repo_id, retrieval_query, commit_sha=commit_sha)
+    code, skills = await retrieve(
+        repo_id, retrieval_query, commit_sha=commit_sha, file_paths=file_paths
+    )
 
-    if not code and not skills:
-        msg = REFUSAL_TEXT
+    # In strict mode, refuse early when retrieval is empty.
+    # In plan mode, proceed: the model can still reason from general knowledge.
+    if mode == "strict" and not code and not skills:
         if commit_sha:
             msg = (
                 f"No indexed chunks were found for commit prefix '{commit_sha}'. "
                 "Either the commit hasn't been indexed yet (try Sync), or remove the "
                 "commit scope to broaden retrieval."
             )
+        elif file_paths:
+            msg = (
+                "No indexed chunks were found for the file(s) you referenced: "
+                + ", ".join(file_paths)
+                + ". Check the @-mention spelling, or remove the @file scope to "
+                "broaden retrieval."
+            )
+        else:
+            msg = REFUSAL_TEXT
         await persist_turn(chat_id, repo_id, "user", question)
         await persist_turn(chat_id, repo_id, "assistant", msg)
         return {
@@ -269,10 +373,20 @@ async def answer(
             "grounded": False,
             "history_turns_used": len(history),
             "commit_scope": commit_sha,
+            "file_scope": list(file_paths) if file_paths else [],
+            "mode": mode,
         }
 
-    prompt = _build_prompt(question, code, skills, history, commit_sha=commit_sha)
-    text = await asyncio.to_thread(_gen_sync, prompt)
+    prompt = _build_prompt(
+        question,
+        code,
+        skills,
+        history,
+        commit_sha=commit_sha,
+        file_paths=file_paths,
+        mode=mode,
+    )
+    text = await asyncio.to_thread(_gen_sync, prompt, mode)
     if not text:
         text = REFUSAL_TEXT
 
@@ -285,7 +399,9 @@ async def answer(
             "code": [asdict(c) for c in code],
             "skills": [asdict(s) for s in skills],
         },
-        "grounded": True,
+        "grounded": bool(code or skills),
         "history_turns_used": len(history),
         "commit_scope": commit_sha,
+        "file_scope": list(file_paths) if file_paths else [],
+        "mode": mode,
     }
