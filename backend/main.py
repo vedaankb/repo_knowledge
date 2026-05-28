@@ -13,12 +13,18 @@ from typing import Optional
 from uuid import UUID
 
 import httpx
-from fastapi import BackgroundTasks, FastAPI, File, HTTPException, UploadFile
+from fastapi import BackgroundTasks, FastAPI, File, Header, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from .api_keys import (
+    KEY_NOT_CONFIGURED_MESSAGE,
+    KeyNotConfiguredError,
+    get_current_gemini_key,
+    set_current_gemini_key,
+)
 from .chat import answer, preview
 from .chat_memory import count_turns, delete_chat
 from .config import get_settings
@@ -28,6 +34,7 @@ from .indexer import (
     delete_repo,
     finish_sync_run,
     get_repo_by_owner_name,
+    get_repo_gemini_token,
     get_repo_row,
     get_repo_token,
     index_local_directory,
@@ -71,6 +78,43 @@ app.add_middleware(
 )
 
 
+@app.middleware("http")
+async def _gemini_key_middleware(request: Request, call_next):
+    """Read the user's Gemini key from the X-Gemini-Key header and stash it in
+    a ContextVar that every downstream embedding / chat call reads from.
+
+    There is NO .env fallback — each user brings their own key.
+    """
+    key = request.headers.get("x-gemini-key")
+    if key:
+        set_current_gemini_key(key)
+    return await call_next(request)
+
+
+def _key_required_exception() -> HTTPException:
+    return HTTPException(
+        status_code=400,
+        detail={"code": "gemini_key_required", "message": KEY_NOT_CONFIGURED_MESSAGE},
+    )
+
+
+@app.exception_handler(KeyNotConfiguredError)
+async def _key_not_configured_handler(_request: Request, _exc: KeyNotConfiguredError):
+    """Bubbling KeyNotConfiguredError from background-thread chat/embeddings
+    surfaces as a clean structured 400 instead of an opaque 500.
+    """
+    from fastapi.responses import JSONResponse
+    return JSONResponse(
+        status_code=400,
+        content={
+            "detail": {
+                "code": "gemini_key_required",
+                "message": KEY_NOT_CONFIGURED_MESSAGE,
+            }
+        },
+    )
+
+
 class RegisterRepoRequest(BaseModel):
     url: str
     token: Optional[str] = None
@@ -83,6 +127,7 @@ class ChatRequest(BaseModel):
     commit_sha: Optional[str] = Field(default=None, max_length=64)
     file_paths: Optional[list[str]] = None
     mode: str = Field(default="strict", pattern=r"^(strict|plan)$")
+    user_preferences: Optional[list[str]] = None
 
 
 @app.get("/api/health")
@@ -108,6 +153,10 @@ async def register_repo(req: RegisterRepoRequest, bg: BackgroundTasks) -> dict:
             },
         )
     effective_token = user_token or settings.github_token
+
+    gemini_key = get_current_gemini_key()
+    if not gemini_key:
+        raise _key_required_exception()
 
     try:
         async with GitHubClient(token=effective_token) as gh:
@@ -144,8 +193,9 @@ async def register_repo(req: RegisterRepoRequest, bg: BackgroundTasks) -> dict:
         info.owner, info.name, info.default_branch, info.visibility,
         source="github",
         github_token=user_token,
+        gemini_token=gemini_key,
     )
-    bg.add_task(_initial_index_task, repo_id, info.owner, info.name)
+    bg.add_task(_initial_index_task, repo_id, info.owner, info.name, gemini_key)
 
     return {
         "repo_id": str(repo_id),
@@ -157,8 +207,16 @@ async def register_repo(req: RegisterRepoRequest, bg: BackgroundTasks) -> dict:
     }
 
 
-async def _initial_index_task(repo_id: UUID, owner: str, name: str) -> None:
+async def _initial_index_task(
+    repo_id: UUID, owner: str, name: str, gemini_key: Optional[str] = None
+) -> None:
     settings = get_settings()
+    if gemini_key:
+        set_current_gemini_key(gemini_key)
+    else:
+        stored = await get_repo_gemini_token(repo_id)
+        if stored:
+            set_current_gemini_key(stored)
     run_id = await start_sync_run(repo_id, kind="initial")
     files_scanned = 0
     chunks_upserted = 0
@@ -269,7 +327,9 @@ async def repo_status(repo_id: UUID) -> dict:
     }
 
 
-def _normalize_chat_req(req: ChatRequest) -> tuple[str, Optional[str], Optional[list[str]], str]:
+def _normalize_chat_req(
+    req: ChatRequest,
+) -> tuple[str, Optional[str], Optional[list[str]], str, Optional[list[str]]]:
     if not (req.question or "").strip():
         raise HTTPException(400, "question is required")
     commit_sha = (req.commit_sha or "").strip() or None
@@ -283,7 +343,14 @@ def _normalize_chat_req(req: ChatRequest) -> tuple[str, Optional[str], Optional[
         cleaned = [p for p in cleaned if p]
         file_paths = cleaned[:10] or None
     mode = req.mode if req.mode in ("strict", "plan") else "strict"
-    return req.question.strip(), commit_sha, file_paths, mode
+    prefs: Optional[list[str]] = None
+    if req.user_preferences:
+        prefs = [
+            p.strip() for p in req.user_preferences if p and p.strip()
+        ][:30]
+        if not prefs:
+            prefs = None
+    return req.question.strip(), commit_sha, file_paths, mode, prefs
 
 
 @app.post("/api/chat")
@@ -291,10 +358,13 @@ async def chat(req: ChatRequest) -> dict:
     repo = await get_repo_row(req.repo_id)
     if not repo:
         raise HTTPException(404, "repo not found")
-    question, commit_sha, file_paths, mode = _normalize_chat_req(req)
+    question, commit_sha, file_paths, mode, prefs = _normalize_chat_req(req)
+    if not get_current_gemini_key():
+        raise _key_required_exception()
     return await answer(
         req.repo_id, req.chat_id, question,
         commit_sha=commit_sha, file_paths=file_paths, mode=mode,
+        user_preferences=prefs,
     )
 
 
@@ -303,10 +373,13 @@ async def chat_preview(req: ChatRequest) -> dict:
     repo = await get_repo_row(req.repo_id)
     if not repo:
         raise HTTPException(404, "repo not found")
-    question, commit_sha, file_paths, mode = _normalize_chat_req(req)
+    question, commit_sha, file_paths, mode, prefs = _normalize_chat_req(req)
+    if not get_current_gemini_key():
+        raise _key_required_exception()
     return await preview(
         req.repo_id, req.chat_id, question,
         commit_sha=commit_sha, file_paths=file_paths, mode=mode,
+        user_preferences=prefs,
     )
 
 
@@ -453,6 +526,11 @@ async def upload_repo(
     children = [c for c in extract_root.iterdir() if c.is_dir()]
     root_for_index = children[0] if len(children) == 1 else extract_root
 
+    gemini_key = get_current_gemini_key()
+    if not gemini_key:
+        shutil.rmtree(tmp_root, ignore_errors=True)
+        raise _key_required_exception()
+
     label = _safe_label(file.filename)
     name = f"{label}-{uuid.uuid4().hex[:8]}"
     repo_id = await upsert_repo(
@@ -462,8 +540,9 @@ async def upload_repo(
         visibility="private",
         source="upload",
         label=label,
+        gemini_token=gemini_key,
     )
-    bg.add_task(_zip_index_task, repo_id, root_for_index, tmp_root)
+    bg.add_task(_zip_index_task, repo_id, root_for_index, tmp_root, gemini_key)
     return {
         "repo_id": str(repo_id),
         "owner": "upload",
@@ -474,7 +553,16 @@ async def upload_repo(
     }
 
 
-async def _zip_index_task(repo_id: UUID, root: Path, cleanup_root: Path) -> None:
+async def _zip_index_task(
+    repo_id: UUID, root: Path, cleanup_root: Path,
+    gemini_key: Optional[str] = None,
+) -> None:
+    if gemini_key:
+        set_current_gemini_key(gemini_key)
+    else:
+        stored = await get_repo_gemini_token(repo_id)
+        if stored:
+            set_current_gemini_key(stored)
     run_id = await start_sync_run(repo_id, kind="upload")
     files_scanned = 0
     chunks_upserted = 0

@@ -12,6 +12,7 @@ CREATE TABLE IF NOT EXISTS repos (
     last_indexed_sha TEXT,
     last_synced_at  TIMESTAMPTZ,
     github_token_ref TEXT,
+    gemini_token_ref TEXT,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE (owner, name)
@@ -66,11 +67,13 @@ CREATE TABLE IF NOT EXISTS chat_turns (
     repo_id     UUID NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
     role        TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
     content     TEXT NOT NULL,
+    turn_index  INTEGER NOT NULL DEFAULT 0,
     embedding   vector(768),
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 CREATE INDEX IF NOT EXISTS chat_turns_chat_idx ON chat_turns (chat_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS chat_turns_chat_turn_idx ON chat_turns (chat_id, turn_index);
 CREATE INDEX IF NOT EXISTS chat_turns_embedding_idx
     ON chat_turns USING hnsw (embedding vector_cosine_ops);
 

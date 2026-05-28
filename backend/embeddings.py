@@ -12,6 +12,11 @@ from typing import Iterable
 import httpx
 from tenacity import retry, stop_after_attempt, wait_exponential
 
+from .api_keys import (
+    KeyNotConfiguredError,
+    get_current_gemini_key,
+    require_current_gemini_key,
+)
 from .config import get_settings
 
 _EMBED_BASE = "https://generativelanguage.googleapis.com/v1/models"
@@ -34,8 +39,7 @@ def _model_id(model: str) -> str:
 @retry(stop=stop_after_attempt(4), wait=wait_exponential(min=1, max=8))
 async def _embed_one(text: str, task_type: str) -> list[float]:
     settings = get_settings()
-    if not settings.gemini_api_key:
-        raise RuntimeError("GEMINI_API_KEY is not set")
+    api_key = require_current_gemini_key()
 
     model_id = _model_id(settings.gemini_embed_model)
     url = f"{_EMBED_BASE}/{model_id}:embedContent"
@@ -45,7 +49,7 @@ async def _embed_one(text: str, task_type: str) -> list[float]:
         "taskType": task_type,
         "outputDimensionality": get_settings().embedding_dim,
     }
-    headers = {"x-goog-api-key": settings.gemini_api_key}
+    headers = {"x-goog-api-key": api_key}
 
     r = await _client().post(url, json=payload, headers=headers)
     if r.status_code == 404:
@@ -83,7 +87,5 @@ async def embed_query(text: str) -> list[float]:
 
 
 def _ensure_configured() -> None:
-    """Legacy shim used by chat.py — validates key is present."""
-    settings = get_settings()
-    if not settings.gemini_api_key:
-        raise RuntimeError("GEMINI_API_KEY is not set")
+    """Legacy shim — validates a key is present in the current request context."""
+    require_current_gemini_key()

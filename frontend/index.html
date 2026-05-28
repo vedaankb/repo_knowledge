@@ -13,6 +13,51 @@
       <button id="new-chat" class="btn-primary" title="Start a new chat">+ New chat</button>
     </div>
     <div class="tablist" id="tablist"></div>
+    <div class="sidebar-settings">
+      <details id="settings-key">
+        <summary>
+          <span>Gemini API key</span>
+          <span class="settings-status" id="settings-key-status"></span>
+        </summary>
+        <div class="settings-body">
+          <input id="settings-key-input"
+                 class="input mono"
+                 type="password"
+                 placeholder="AIza... (your Google AI Studio key)"
+                 autocomplete="off"
+                 spellcheck="false" />
+          <div class="settings-actions">
+            <button class="btn-ghost" id="settings-key-save" type="button">Save</button>
+            <button class="btn-ghost" id="settings-key-clear" type="button">Clear</button>
+          </div>
+          <p class="muted small">
+            One-time. Stored in this browser's <code>localStorage</code>, sent on every request as <code>X-Gemini-Key</code>. Plug-and-play — no .env or restart needed.
+          </p>
+        </div>
+      </details>
+
+      <details id="settings-prefs">
+        <summary>
+          <span>Remembered preferences</span>
+          <span class="settings-status" id="settings-prefs-count">0</span>
+        </summary>
+        <div class="settings-body">
+          <ul class="prefs-list" id="prefs-list"></ul>
+          <div class="prefs-add">
+            <input id="prefs-input"
+                   class="input"
+                   type="text"
+                   placeholder="e.g. always cite line numbers; prefer bullet points"
+                   autocomplete="off" />
+            <button class="btn-ghost" id="prefs-add-btn" type="button">Add</button>
+          </div>
+          <p class="muted small">
+            Used in <b>every chat</b> as a system-prompt section. Quick way: type
+            <code>/remember &lt;your preference&gt;</code> or <code>/forget &lt;text&gt;</code> in any chat.
+          </p>
+        </div>
+      </details>
+    </div>
     <div class="sidebar-footer">
       <div class="hint">
         <p><b>Strict mode.</b> Each chat is grounded only in the repo you load into it. Knowledge is never shared between chats.</p>

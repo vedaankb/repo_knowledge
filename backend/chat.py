@@ -10,7 +10,8 @@ from uuid import UUID
 
 import google.generativeai as genai
 
-from .chat_memory import persist_turn, retrieve_chat_context
+from .api_keys import require_current_gemini_key
+from .chat_memory import last_turn_index, persist_turn, retrieve_chat_context
 from .config import get_settings
 from .embeddings import _ensure_configured
 from .retriever import CodeHit, SkillHit, retrieve
@@ -41,6 +42,11 @@ GUIDELINES:
   weaknesses given the visible code plus standard threats for that stack
   (e.g., OWASP top 10 categories that apply here).
 - Do NOT invent files or symbols that aren't in CONTEXT; only reason about them.
+
+CHAT MEMORY:
+- PRIOR CONVERSATION lists past messages tagged [turn N · role]. Treat turn 1
+  as the chat anchor. Refer back to specific turns when relevant.
+- Don't invent earlier turns not present.
 """
 
 SYSTEM_PROMPT = """You are a strict repository-grounded assistant for a single GitHub repo.
@@ -57,6 +63,15 @@ HARD RULES:
   commit SHA (uploaded zip), cite without @sha.
 - If the user has scoped the chat to a specific commit, mention that scope once at
   the top of your answer.
+
+CHAT MEMORY:
+- The PRIOR CONVERSATION block lists prior messages from THIS chat only, tagged
+  [turn N · role]. Turn 1 is always the chat's anchor. Use these for resolving
+  references like "the file we just looked at", "your earlier answer in turn 4",
+  "redo it for the other one". When you reference an earlier moment, cite the
+  turn number, e.g. "as discussed in turn 3".
+- Never invent earlier turns. If the user references something that isn't in
+  the shown history, say you don't see it and ask them to repeat it.
 
 ANSWER STYLE:
 - For "what is this repo / overview" questions: synthesize from README/AGENTS/ARCHITECTURE
@@ -105,19 +120,55 @@ def _format_skill_context(hits: list[SkillHit]) -> str:
     return "\n".join(lines)
 
 
-def _format_history(history: list[dict]) -> str:
+def _format_history(history: list[dict], current_turn_idx: int | None = None) -> str:
+    """Render prior turns with their per-chat sequence number.
+
+    Lines look like: `[turn 3 · user] how does auth flow?`
+    """
     if not history:
         return "(no prior turns)"
     lines: list[str] = []
-    for turn in history[-6:]:
+    for turn in history:
         role = turn.get("role", "user")
         content = (turn.get("content") or "").strip()
         if not content:
             continue
-        if len(content) > 800:
-            content = content[:800] + "..."
-        lines.append(f"{role}: {content}")
+        if len(content) > 1600:
+            content = content[:1600] + "..."
+        idx = turn.get("turn_index")
+        prefix = f"[turn {idx} · {role}]" if idx is not None else f"[{role}]"
+        lines.append(f"{prefix} {content}")
+    if current_turn_idx is not None:
+        lines.append(
+            f"(The user's NEW message will be turn {current_turn_idx + 1} in this chat.)"
+        )
     return "\n".join(lines) if lines else "(no prior turns)"
+
+
+def _format_preferences(prefs: Optional[list[str]]) -> str:
+    """Render user `/remember` entries as a high-priority prompt section."""
+    if not prefs:
+        return ""
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for p in prefs:
+        s = (p or "").strip()
+        if not s or s.lower() in seen:
+            continue
+        seen.add(s.lower())
+        cleaned.append(s[:400])
+        if len(cleaned) >= 30:
+            break
+    if not cleaned:
+        return ""
+    bullets = "\n".join(f"- {p}" for p in cleaned)
+    return (
+        "=== USER BEHAVIOR / STYLE PREFERENCES (from /remember) ===\n"
+        "The user has explicitly told you how they like things. Follow these in "
+        "ALL responses, across ALL chats, unless they conflict with the HARD "
+        "RULES above (in which case the HARD RULES win):\n"
+        f"{bullets}\n\n"
+    )
 
 
 def _build_prompt(
@@ -128,6 +179,8 @@ def _build_prompt(
     commit_sha: Optional[str] = None,
     file_paths: Optional[list[str]] = None,
     mode: str = "strict",
+    current_turn_idx: Optional[int] = None,
+    user_preferences: Optional[list[str]] = None,
 ) -> str:
     system = PLAN_SYSTEM_PROMPT if mode == "plan" else SYSTEM_PROMPT
     topics = extract_topics(history, cap=20)
@@ -171,12 +224,23 @@ def _build_prompt(
         )
     )
 
+    history_note = (
+        "Each line is one prior message in THIS chat, tagged with its turn "
+        "number [turn N · role]. Turn 1 is the chat's anchor (the original "
+        "request). Use these to resolve references like 'that file we looked "
+        "at', 'your earlier answer', or 'the function from turn 4'. Do NOT "
+        "invent earlier turns that aren't shown."
+    )
+    prefs_block = _format_preferences(user_preferences)
     return (
         f"{system}\n\n"
+        f"{prefs_block}"
         f"{mode_block}"
         f"{scope_block}"
         f"=== TOPICS DISCUSSED IN THIS CHAT (rolling memory) ===\n{topics_line}\n\n"
-        f"=== PRIOR CONVERSATION (this chat only, last few turns) ===\n{_format_history(history)}\n\n"
+        f"=== PRIOR CONVERSATION (this chat only) ===\n"
+        f"{history_note}\n\n"
+        f"{_format_history(history, current_turn_idx=current_turn_idx)}\n\n"
         f"=== REPO CONVENTIONS / PR NOTES ===\n{_format_skill_context(skills)}\n\n"
         f"=== CODE CONTEXT ===\n{_format_code_context(code)}\n\n"
         f"=== USER QUESTION ===\n{question}\n\n"
@@ -186,9 +250,8 @@ def _build_prompt(
 
 def _gen_sync(prompt: str, mode: str = "strict") -> str:
     settings = get_settings()
-    if not settings.gemini_api_key:
-        raise RuntimeError("GEMINI_API_KEY is not set")
-    genai.configure(api_key=settings.gemini_api_key)
+    api_key = require_current_gemini_key()
+    genai.configure(api_key=api_key)
 
     generation_config = {
         "temperature": 0.4 if mode == "plan" else 0.1,
@@ -247,13 +310,17 @@ _BACKTICK_PATH_RE = re.compile(r"`(?P<file>[A-Za-z0-9_./\-]+\.[A-Za-z0-9]+)`")
 
 
 def extract_topics(history: Optional[list[dict]], cap: int = 20) -> list[str]:
-    """Pull recurring repo identifiers out of past assistant turns. No LLM call."""
+    """Pull recurring repo identifiers out of prior turns. No LLM call.
+
+    Considers BOTH user and assistant content so that a user typing
+    `@backend/main.py` in turn 2 still surfaces as a topic for turn 6.
+    """
     topics: list[str] = []
     seen: set[str] = set()
     if not history:
         return topics
     for turn in history:
-        if turn.get("role") != "assistant":
+        if turn.get("role") not in ("user", "assistant"):
             continue
         content = (turn.get("content") or "")[:4000]
         if not content:
@@ -312,6 +379,7 @@ async def preview(
     commit_sha: Optional[str] = None,
     file_paths: Optional[list[str]] = None,
     mode: str = "strict",
+    user_preferences: Optional[list[str]] = None,
 ) -> dict:
     """Return the top-k retrieved chunks without calling the LLM.
 
@@ -323,10 +391,13 @@ async def preview(
     code, skills = await retrieve(
         repo_id, retrieval_query, commit_sha=commit_sha, file_paths=file_paths
     )
+    last_idx = await last_turn_index(chat_id)
     return {
         "code": [asdict(c) for c in code],
         "skills": [asdict(s) for s in skills],
         "history_turns_used": len(history),
+        "history_turns_total": last_idx,
+        "next_turn_index": last_idx + 1,
         "commit_scope": commit_sha,
         "file_scope": list(file_paths) if file_paths else [],
         "mode": mode,
@@ -340,8 +411,10 @@ async def answer(
     commit_sha: Optional[str] = None,
     file_paths: Optional[list[str]] = None,
     mode: str = "strict",
+    user_preferences: Optional[list[str]] = None,
 ) -> dict:
     history = await retrieve_chat_context(chat_id, question)
+    last_idx = await last_turn_index(chat_id)
     retrieval_query = build_retrieval_query(question, history)
     code, skills = await retrieve(
         repo_id, retrieval_query, commit_sha=commit_sha, file_paths=file_paths
@@ -365,13 +438,16 @@ async def answer(
             )
         else:
             msg = REFUSAL_TEXT
-        await persist_turn(chat_id, repo_id, "user", question)
-        await persist_turn(chat_id, repo_id, "assistant", msg)
+        user_idx = await persist_turn(chat_id, repo_id, "user", question)
+        assistant_idx = await persist_turn(chat_id, repo_id, "assistant", msg)
         return {
             "answer": msg,
             "sources": {"code": [], "skills": []},
             "grounded": False,
             "history_turns_used": len(history),
+            "history_turns_total": assistant_idx,
+            "user_turn_index": user_idx,
+            "assistant_turn_index": assistant_idx,
             "commit_scope": commit_sha,
             "file_scope": list(file_paths) if file_paths else [],
             "mode": mode,
@@ -385,13 +461,15 @@ async def answer(
         commit_sha=commit_sha,
         file_paths=file_paths,
         mode=mode,
+        current_turn_idx=last_idx,
+        user_preferences=user_preferences,
     )
     text = await asyncio.to_thread(_gen_sync, prompt, mode)
     if not text:
         text = REFUSAL_TEXT
 
-    await persist_turn(chat_id, repo_id, "user", question)
-    await persist_turn(chat_id, repo_id, "assistant", text)
+    user_idx = await persist_turn(chat_id, repo_id, "user", question)
+    assistant_idx = await persist_turn(chat_id, repo_id, "assistant", text)
 
     return {
         "answer": text,
@@ -401,6 +479,9 @@ async def answer(
         },
         "grounded": bool(code or skills),
         "history_turns_used": len(history),
+        "history_turns_total": assistant_idx,
+        "user_turn_index": user_idx,
+        "assistant_turn_index": assistant_idx,
         "commit_scope": commit_sha,
         "file_scope": list(file_paths) if file_paths else [],
         "mode": mode,

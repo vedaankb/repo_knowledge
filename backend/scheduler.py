@@ -5,10 +5,12 @@ from datetime import datetime, timezone
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
+from .api_keys import set_current_gemini_key
 from .config import get_settings
 from .github_client import GitHubClient
 from .indexer import (
     finish_sync_run,
+    get_repo_gemini_token,
     get_repo_token,
     index_repo_delta,
     ingest_prs,
@@ -21,6 +23,11 @@ log = logging.getLogger(__name__)
 
 async def sync_repo(repo_id, owner: str, name: str) -> None:
     settings = get_settings()
+    # Scheduler runs without a request context. Pull the snapshotted user
+    # gemini key from the repo row so embeddings during sync succeed.
+    stored = await get_repo_gemini_token(repo_id)
+    if stored:
+        set_current_gemini_key(stored)
     run_id = await start_sync_run(repo_id, kind="delta")
     files_scanned = 0
     chunks_upserted = 0

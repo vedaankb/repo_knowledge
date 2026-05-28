@@ -6,7 +6,53 @@
 
 const MAX_TABS = 5;
 const STORAGE_KEY = "repo_knowledge_session_v1";
+const GEMINI_KEY_LS = "repo_knowledge_gemini_key_v1";
+const PREFS_LS = "repo_knowledge_user_prefs_v1";
 const POLL_MS = 3000;
+
+/* ---- User-scoped settings (localStorage, survives reloads) ---- */
+function getGeminiKey() {
+  try { return localStorage.getItem(GEMINI_KEY_LS) || ""; } catch { return ""; }
+}
+function setGeminiKey(v) {
+  try {
+    if (v) localStorage.setItem(GEMINI_KEY_LS, v);
+    else localStorage.removeItem(GEMINI_KEY_LS);
+  } catch {}
+}
+function getPrefs() {
+  try {
+    const raw = localStorage.getItem(PREFS_LS);
+    if (!raw) return [];
+    const arr = JSON.parse(raw);
+    return Array.isArray(arr) ? arr.filter((p) => typeof p === "string" && p.trim()) : [];
+  } catch { return []; }
+}
+function setPrefs(list) {
+  try { localStorage.setItem(PREFS_LS, JSON.stringify(list)); } catch {}
+}
+function addPref(text) {
+  const t = (text || "").trim();
+  if (!t) return false;
+  const list = getPrefs();
+  if (list.some((p) => p.toLowerCase() === t.toLowerCase())) return false;
+  list.push(t);
+  setPrefs(list.slice(0, 30));
+  return true;
+}
+function removePref(matcher) {
+  const m = (matcher || "").trim().toLowerCase();
+  if (!m) return 0;
+  const before = getPrefs();
+  const after = before.filter((p) => !p.toLowerCase().includes(m));
+  setPrefs(after);
+  return before.length - after.length;
+}
+function clearPrefs() {
+  const n = getPrefs().length;
+  setPrefs([]);
+  return n;
+}
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
@@ -30,10 +76,13 @@ function uid() {
 }
 
 async function api(path, opts = {}) {
-  const res = await fetch(path, {
-    headers: opts.body && !(opts.body instanceof FormData) ? { "Content-Type": "application/json" } : undefined,
-    ...opts,
-  });
+  const headers = Object.assign({}, opts.headers || {});
+  if (opts.body && !(opts.body instanceof FormData) && !headers["Content-Type"]) {
+    headers["Content-Type"] = "application/json";
+  }
+  const key = getGeminiKey();
+  if (key) headers["X-Gemini-Key"] = key;
+  const res = await fetch(path, { ...opts, headers });
   if (!res.ok) {
     let detail = null;
     let raw = "";
@@ -259,6 +308,13 @@ function renderOnboarding(main, chat) {
   ghForm.addEventListener("submit", async (e) => {
     e.preventDefault();
     showErr(null);
+    if (!getGeminiKey()) {
+      showErr("Gemini API key is not configured. Open the sidebar Settings panel, paste your Google AI Studio key, then try again.");
+      const details = document.querySelector("#settings-key");
+      if (details) details.open = true;
+      setTimeout(() => document.querySelector("#settings-key-input")?.focus(), 0);
+      return;
+    }
     const url = ghForm.url.value.trim();
     const token = (tokenInput.value || "").trim();
     if (!url) return;
@@ -283,7 +339,12 @@ function renderOnboarding(main, chat) {
       renderMain();
     } catch (err) {
       btn.disabled = false; btn.textContent = "Index";
-      if (err.code === "auth_required" || err.code === "token_required") {
+      if (err.code === "gemini_key_required") {
+        showErr(err.message || "Add your Gemini API key in the sidebar Settings panel first.");
+        const details = document.querySelector("#settings-key");
+        if (details) details.open = true;
+        setTimeout(() => document.querySelector("#settings-key-input")?.focus(), 0);
+      } else if (err.code === "auth_required" || err.code === "token_required") {
         showErr(err.message || "GitHub access token is required.");
         setTimeout(() => tokenInput.focus(), 0);
       } else if (err.code === "invalid_token") {
@@ -302,6 +363,13 @@ function renderOnboarding(main, chat) {
     if (!file) return;
     if (!file.name.toLowerCase().endsWith(".zip")) {
       showErr("Please upload a .zip file."); return;
+    }
+    if (!getGeminiKey()) {
+      showErr("Gemini API key is not configured. Open the sidebar Settings panel, paste your Google AI Studio key, then try again.");
+      const details = document.querySelector("#settings-key");
+      if (details) details.open = true;
+      setTimeout(() => document.querySelector("#settings-key-input")?.focus(), 0);
+      return;
     }
     showErr(null);
     dropzone.querySelector(".dz-title").textContent = `Uploading ${file.name}...`;
@@ -367,11 +435,16 @@ function renderChat(main, chat) {
     (m) => (m.role === "user" || m.role === "assistant") && !m.previewing
   ).length;
   const scopeLabel = chat.commitScope ? `scope: @${chat.commitScope.slice(0, 7)}` : null;
+  // Prefer the authoritative count from the vector DB (chat_turns), which
+  // includes turns from earlier sessions on this chat_id.
+  const memoryLabel = chat.dbTurns != null
+    ? `memory: ${chat.dbTurns} turn${chat.dbTurns === 1 ? "" : "s"} in vec-DB`
+    : `memory: ${exchanges} turn${exchanges === 1 ? "" : "s"}`;
   subEl.textContent = [
     chat.sub,
     `code: ${chat.counts.code_chunks}`,
     `skills: ${chat.counts.feature_skills}`,
-    `memory: ${exchanges} turn${exchanges === 1 ? "" : "s"}`,
+    memoryLabel,
     scopeLabel,
   ].filter(Boolean).join(" · ");
 
@@ -562,7 +635,48 @@ function renderChat(main, chat) {
 
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
-    const raw = input.value;
+    const raw = (input.value || "").trim();
+    if (!raw) return;
+
+    // Slash commands that never hit the backend - they mutate local prefs only.
+    if (/^\/remember(\s|$)/i.test(raw)) {
+      const body = raw.replace(/^\/remember\s*/i, "").trim();
+      if (!body) {
+        const cur = getPrefs();
+        pushSystem(chat, cur.length
+          ? `Remembered preferences (${cur.length}):\n${cur.map((p, i) => `  ${i + 1}. ${p}`).join("\n")}`
+          : "No remembered preferences yet. Try: /remember always cite line numbers");
+      } else if (addPref(body)) {
+        pushSystem(chat, `Saved preference: "${body}". Applied to all chats from now on.`);
+      } else {
+        pushSystem(chat, `Already remembered: "${body}".`);
+      }
+      renderSidebarSettings();
+      input.value = "";
+      renderTags({ mode: "strict", filePaths: [] });
+      hidePopup();
+      renderMain();
+      return;
+    }
+    if (/^\/forget(\s|$)/i.test(raw)) {
+      const body = raw.replace(/^\/forget\s*/i, "").trim();
+      if (body.toLowerCase() === "all") {
+        const n = clearPrefs();
+        pushSystem(chat, n ? `Cleared all ${n} remembered preference${n === 1 ? "" : "s"}.` : "Nothing to forget.");
+      } else if (!body) {
+        pushSystem(chat, "Usage: /forget <text matching a preference>, or /forget all.");
+      } else {
+        const n = removePref(body);
+        pushSystem(chat, n ? `Forgot ${n} preference${n === 1 ? "" : "s"} matching "${body}".` : `No preference matched "${body}".`);
+      }
+      renderSidebarSettings();
+      input.value = "";
+      renderTags({ mode: "strict", filePaths: [] });
+      hidePopup();
+      renderMain();
+      return;
+    }
+
     const parsed = parseComposer(raw);
     if (!parsed.question) return;
     chat.commitScope = (scopeInput.value || "").trim() || null;
@@ -578,6 +692,22 @@ function renderChat(main, chat) {
     const m = $(".messages", main);
     if (m) m.scrollTop = m.scrollHeight;
   });
+
+  // Refresh authoritative DB turn count for this chat, async, no UI block.
+  fetch(`/api/chats/${encodeURIComponent(chat.id)}/turns/count`)
+    .then((r) => r.json())
+    .then((j) => {
+      if (typeof j.turns === "number" && j.turns !== chat.dbTurns) {
+        chat.dbTurns = j.turns;
+        const sub = $(".chat-sub", main);
+        if (sub) sub.textContent = sub.textContent.replace(
+          /memory: \d+ turns?[^·]*/,
+          `memory: ${j.turns} turn${j.turns === 1 ? "" : "s"} in vec-DB`,
+        );
+        persist();
+      }
+    })
+    .catch(() => {});
 }
 
 function appendMessageDom(container, m) {
@@ -586,6 +716,9 @@ function appendMessageDom(container, m) {
   div.className = `msg ${m.role}${refusal}`;
   const modeBadge = m.role === "assistant" && m.mode === "plan"
     ? `<div class="mode-badge plan">plan mode</div>`
+    : "";
+  const turnBadge = m.turnIndex
+    ? `<div class="turn-badge" title="Turn ${m.turnIndex} in this chat's vector memory">turn ${m.turnIndex}</div>`
     : "";
   if (m.role === "system") {
     div.textContent = m.content;
@@ -602,11 +735,11 @@ function appendMessageDom(container, m) {
       ${renderPreviewHtml(m.previewSources)}
     `;
   } else if (m.role === "assistant") {
-    let html = modeBadge + `<div>${renderMarkdownish(m.content)}</div>`;
+    let html = modeBadge + turnBadge + `<div>${renderMarkdownish(m.content)}</div>`;
     if (m.sources) html += renderSourcesHtml(m.sources);
     div.innerHTML = html;
   } else {
-    div.innerHTML = `<div>${renderMarkdownish(m.content)}</div>`;
+    div.innerHTML = turnBadge + `<div>${renderMarkdownish(m.content)}</div>`;
   }
   container.appendChild(div);
 }
@@ -701,6 +834,7 @@ async function ask(chat, parsed) {
 
   // STRICT ISOLATION: server retrieves prior turns by chat_id only.
   // We never send history in-band — keeps prompt bounded, scales to long chats.
+  const prefs = getPrefs();
   const body = JSON.stringify({
     repo_id: chat.repoId,
     chat_id: chat.id,
@@ -708,6 +842,7 @@ async function ask(chat, parsed) {
     commit_sha: chat.commitScope || null,
     file_paths: filePaths.length ? filePaths : null,
     mode,
+    user_preferences: prefs.length ? prefs : null,
   });
 
   const previewP = api("/api/chat/preview", { method: "POST", body })
@@ -734,17 +869,33 @@ async function ask(chat, parsed) {
       refusal,
       mode: res.mode || mode,
       filePaths,
+      turnIndex: res.assistant_turn_index,
       ts: Date.now(),
     };
+    // Update the user's previous message with its server-assigned turn_index.
+    const userMsg = chat.messages[placeholderIdx - 1];
+    if (userMsg && userMsg.role === "user") {
+      userMsg.turnIndex = res.user_turn_index;
+    }
+    if (typeof res.history_turns_total === "number") {
+      chat.dbTurns = res.history_turns_total;
+    }
   } catch (e) {
+    const msg = e.code === "gemini_key_required"
+      ? `${e.message || "Gemini API key missing."} Open the sidebar Settings panel, paste your key, hit Save, then try again.`
+      : `Error: ${e.message}`;
     chat.messages[placeholderIdx] = {
       role: "assistant",
-      content: `Error: ${e.message}`,
+      content: msg,
       refusal: true,
       mode,
       filePaths,
       ts: Date.now(),
     };
+    if (e.code === "gemini_key_required") {
+      const details = document.querySelector("#settings-key");
+      if (details) details.open = true;
+    }
   }
   await previewP;
   persist();
@@ -799,6 +950,85 @@ function startPolling() {
   }, POLL_MS);
 }
 
+/* ---- Sidebar settings ---- */
+function renderSidebarSettings() {
+  const keyStatus = $("#settings-key-status");
+  const keyInput = $("#settings-key-input");
+  const keyDetails = $("#settings-key");
+  if (keyStatus && keyInput) {
+    const k = getGeminiKey();
+    if (k) {
+      keyStatus.textContent = `set · ${k.slice(0, 4)}…${k.slice(-4)}`;
+      keyStatus.classList.add("ok");
+      keyStatus.classList.remove("warn");
+    } else {
+      keyStatus.textContent = "not configured";
+      keyStatus.classList.add("warn");
+      keyStatus.classList.remove("ok");
+      if (keyDetails) keyDetails.open = true;
+    }
+    keyInput.value = k;
+  }
+  const prefs = getPrefs();
+  const cntEl = $("#settings-prefs-count");
+  if (cntEl) {
+    cntEl.textContent = String(prefs.length);
+    cntEl.classList.toggle("ok", prefs.length > 0);
+  }
+  const list = $("#prefs-list");
+  if (list) {
+    list.innerHTML = "";
+    prefs.forEach((p, idx) => {
+      const li = document.createElement("li");
+      li.innerHTML = `<span class="prefs-text"></span><button class="prefs-del" title="Forget">×</button>`;
+      li.querySelector(".prefs-text").textContent = p;
+      li.querySelector(".prefs-del").addEventListener("click", () => {
+        const cur = getPrefs();
+        cur.splice(idx, 1);
+        setPrefs(cur);
+        renderSidebarSettings();
+      });
+      list.appendChild(li);
+    });
+  }
+}
+
+function wireSidebarSettings() {
+  const saveBtn = $("#settings-key-save");
+  const clearBtn = $("#settings-key-clear");
+  const keyInput = $("#settings-key-input");
+  if (saveBtn && keyInput) {
+    saveBtn.addEventListener("click", () => {
+      setGeminiKey((keyInput.value || "").trim());
+      renderSidebarSettings();
+    });
+    keyInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); saveBtn.click(); }
+    });
+  }
+  if (clearBtn && keyInput) {
+    clearBtn.addEventListener("click", () => {
+      setGeminiKey("");
+      keyInput.value = "";
+      renderSidebarSettings();
+    });
+  }
+  const addBtn = $("#prefs-add-btn");
+  const prefInput = $("#prefs-input");
+  if (addBtn && prefInput) {
+    const doAdd = () => {
+      if (addPref(prefInput.value)) {
+        prefInput.value = "";
+        renderSidebarSettings();
+      }
+    };
+    addBtn.addEventListener("click", doAdd);
+    prefInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); doAdd(); }
+    });
+  }
+}
+
 /* ---- Boot ---- */
 $("#new-chat").addEventListener("click", addChat);
 
@@ -806,6 +1036,8 @@ $("#new-chat").addEventListener("click", addChat);
   restore();
   if (state.chats.length === 0) addChat();
   if (!activeChat() && state.chats.length > 0) state.activeId = state.chats[0].id;
+  wireSidebarSettings();
+  renderSidebarSettings();
   renderTabs();
   renderMain();
   startPolling();

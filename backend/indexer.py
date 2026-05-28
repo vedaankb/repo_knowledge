@@ -38,22 +38,26 @@ async def upsert_repo(
     source: str = "github",
     label: Optional[str] = None,
     github_token: Optional[str] = None,
+    gemini_token: Optional[str] = None,
 ) -> UUID:
     sql = """
-    INSERT INTO repos (owner, name, default_branch, visibility, source, label, github_token_ref)
-    VALUES ($1, $2, $3, $4, $5, $6, $7)
+    INSERT INTO repos (owner, name, default_branch, visibility, source, label,
+                       github_token_ref, gemini_token_ref)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
     ON CONFLICT (owner, name) DO UPDATE
       SET default_branch = EXCLUDED.default_branch,
           visibility = EXCLUDED.visibility,
           source = EXCLUDED.source,
           label = COALESCE(EXCLUDED.label, repos.label),
           github_token_ref = COALESCE(EXCLUDED.github_token_ref, repos.github_token_ref),
+          gemini_token_ref = COALESCE(EXCLUDED.gemini_token_ref, repos.gemini_token_ref),
           updated_at = now()
     RETURNING id
     """
     async with pool().acquire() as conn:
         row = await conn.fetchrow(
-            sql, owner, name, default_branch, visibility, source, label, github_token,
+            sql, owner, name, default_branch, visibility, source, label,
+            github_token, gemini_token,
         )
     return row["id"]
 
@@ -64,6 +68,14 @@ async def get_repo_token(repo_id: UUID) -> Optional[str]:
             "SELECT github_token_ref FROM repos WHERE id = $1", repo_id
         )
     return row["github_token_ref"] if row else None
+
+
+async def get_repo_gemini_token(repo_id: UUID) -> Optional[str]:
+    async with pool().acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT gemini_token_ref FROM repos WHERE id = $1", repo_id
+        )
+    return row["gemini_token_ref"] if row else None
 
 
 async def delete_repo(repo_id: UUID) -> bool:
