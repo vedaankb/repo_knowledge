@@ -22,6 +22,11 @@ class Settings(BaseSettings):
 
     embedding_dim: int = 768
 
+    # Gemini generation output limits (tokens). Plan mode needs more room for
+    # multi-section security / architecture answers.
+    max_output_tokens_strict: int = 2048
+    max_output_tokens_plan: int = 8192
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

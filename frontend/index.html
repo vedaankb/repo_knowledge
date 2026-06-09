@@ -74,35 +74,55 @@
     <div class="onboarding">
       <div class="card">
         <h1>Start a new repo chat</h1>
-        <p class="muted">Give me a GitHub repo or upload a code zip. I'll only answer about this repo, never general knowledge.</p>
+        <p class="muted">Connect a PurnaOS workspace, index a GitHub repo, or upload a code zip.</p>
 
-        <div class="section">
-          <h3>Option 1 · GitHub URL</h3>
-          <form data-action="github">
-            <div class="row">
-              <input class="input" type="text" name="url" placeholder="https://github.com/owner/repo" autocomplete="off" required />
-              <button class="btn-primary" type="submit">Index</button>
-            </div>
-            <div class="token-row">
-              <input class="input" type="password" name="token" placeholder="ghp_... (GitHub personal access token)" autocomplete="off" required />
-              <p class="muted small">Required for all GitHub indexing. Use a token with <code>repo</code> scope. Stored only for this chat's sync, never returned by the API.</p>
-            </div>
-          </form>
-          <p class="muted small">Token is mandatory for all GitHub repos in this build.</p>
+        <div class="onboarding-modes">
+          <button class="mode-tab active" data-mode="purna">PurnaOS Workspace</button>
+          <button class="mode-tab" data-mode="github">GitHub URL</button>
+          <button class="mode-tab" data-mode="zip">Upload Zip</button>
         </div>
 
-        <div class="divider"><span>or</span></div>
+        <div class="onboarding-sections">
+          <!-- PurnaOS Workspace Section -->
+          <div class="onboarding-section" id="sec-purna">
+            <h3>Connect PurnaOS Workspace</h3>
+            <form data-action="purna">
+              <div class="row">
+                <input class="input" type="text" name="workspace_id" placeholder="Paste Workspace ID or Repo ID" autocomplete="off" required />
+                <button class="btn-primary" type="submit">Connect</button>
+              </div>
+              <p class="muted small">Connect a local repository provisioned with <code>purna understand</code>. No GitHub token required.</p>
+            </form>
+          </div>
 
-        <div class="section">
-          <h3>Option 2 · Upload code zip</h3>
-          <label class="dropzone" data-action="upload">
-            <input type="file" accept=".zip,application/zip" hidden />
-            <div class="dz-content">
-              <div class="dz-title">Drop a .zip here or click to choose</div>
-              <div class="muted small">Max 100MB · binaries and lockfiles are skipped</div>
-            </div>
-          </label>
+          <!-- GitHub URL Section -->
+          <div class="onboarding-section" id="sec-github" hidden>
+            <h3>GitHub URL</h3>
+            <form data-action="github">
+              <div class="row">
+                <input class="input" type="text" name="url" placeholder="https://github.com/owner/repo" autocomplete="off" required />
+                <button class="btn-primary" type="submit">Index</button>
+              </div>
+              <div class="token-row">
+                <input class="input" type="password" name="token" placeholder="ghp_... (GitHub personal access token)" autocomplete="off" required />
+                <p class="muted small">Required for all GitHub indexing. Use a token with <code>repo</code> scope.</p>
+              </div>
+            </form>
+          </div>
+
+          <!-- Upload Zip Section -->
+          <div class="onboarding-section" id="sec-zip" hidden>
+            <h3>Upload code zip</h3>
+            <label class="dropzone" data-action="upload">
+              <input type="file" accept=".zip,application/zip" hidden />
+              <div class="dz-content">
+                <div class="dz-title">Drop a .zip here or click to choose</div>
+                <div class="muted small">Max 100MB · binaries and lockfiles are skipped</div>
+              </div>
+            </label>
+          </div>
         </div>
+
         <div class="onb-error" hidden></div>
       </div>
     </div>
@@ -136,6 +156,18 @@
         </div>
       </div>
       <div class="messages"></div>
+      
+      <!-- Agent Decisions Log Panel -->
+      <div class="agent-log-panel" id="agent-log-panel" hidden>
+        <div class="agent-log-header">
+          <span>PurnaOS LLM Sync Agent Log</span>
+          <span class="muted small" id="agent-log-status">idle</span>
+        </div>
+        <div class="agent-log-list" id="agent-log-list">
+          <!-- Log items will render here -->
+        </div>
+      </div>
+      
       <div class="scope-bar">
         <label class="scope-pill">
           <span class="scope-pill-label">Scope to commit</span>

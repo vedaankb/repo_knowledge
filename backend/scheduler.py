@@ -17,49 +17,65 @@ from .indexer import (
     list_repos,
     start_sync_run,
 )
+from .knowledge_importer import sync_knowledge_repo
 
 log = logging.getLogger(__name__)
 
 
-async def sync_repo(repo_id, owner: str, name: str) -> None:
+async def sync_repo(repo_id, owner: str, name: str, source: str = "github") -> None:
+    """Periodic sync job for a single repository"""
     settings = get_settings()
-    # Scheduler runs without a request context. Pull the snapshotted user
-    # gemini key from the repo row so embeddings during sync succeed.
+    
+    # Restore Gemini key for this repo
     stored = await get_repo_gemini_token(repo_id)
     if stored:
         set_current_gemini_key(stored)
-    run_id = await start_sync_run(repo_id, kind="delta")
-    files_scanned = 0
-    chunks_upserted = 0
-    prs_ingested = 0
-    try:
-        token = await get_repo_token(repo_id) or settings.github_token
-        async with GitHubClient(token=token) as gh:
-            files_scanned, chunks_upserted, _ = await index_repo_delta(repo_id, gh)
-            since_iso = datetime.now(timezone.utc).isoformat()
-            prs_ingested = await ingest_prs(repo_id, gh, since_iso=None)
-        await finish_sync_run(
-            run_id, "success",
-            files_scanned=files_scanned,
-            chunks_upserted=chunks_upserted,
-            prs_ingested=prs_ingested,
-        )
-        log.info("Synced %s/%s: files=%d chunks=%d prs=%d",
-                 owner, name, files_scanned, chunks_upserted, prs_ingested)
-    except Exception as e:
-        log.exception("sync failed for %s/%s", owner, name)
-        await finish_sync_run(run_id, "error", error=str(e))
+    
+    # Different sync logic based on source type
+    if source == "purna_knowledge":
+        # Knowledge repo: import new artifacts
+        try:
+            log.info(f"Syncing knowledge repo {owner}/{name}...")
+            stats = await sync_knowledge_repo(repo_id, owner, name)
+            log.info(
+                f"Knowledge repo sync complete for {owner}/{name}: "
+                f"{stats['commits_imported']} new commits, {stats['chunks_imported']} chunks"
+            )
+        except Exception as e:
+            log.error(f"Knowledge repo sync failed for {owner}/{name}: {e}", exc_info=True)
+    else:
+        # Source repo: delta sync via GitHub API
+        run_id = await start_sync_run(repo_id, kind="delta")
+        files_scanned = 0
+        chunks_upserted = 0
+        prs_ingested = 0
+        try:
+            token = await get_repo_token(repo_id) or settings.github_token
+            async with GitHubClient(token=token) as gh:
+                files_scanned, chunks_upserted, _ = await index_repo_delta(repo_id, gh)
+                since_iso = datetime.now(timezone.utc).isoformat()
+                prs_ingested = await ingest_prs(repo_id, gh, since_iso=None)
+            await finish_sync_run(
+                run_id, "success",
+                files_scanned=files_scanned,
+                chunks_upserted=chunks_upserted,
+                prs_ingested=prs_ingested,
+            )
+            log.info("Synced %s/%s: files=%d chunks=%d prs=%d",
+                     owner, name, files_scanned, chunks_upserted, prs_ingested)
+        except Exception as e:
+            log.exception("sync failed for %s/%s", owner, name)
+            await finish_sync_run(run_id, "error", error=str(e))
 
 
 async def sync_all_repos() -> None:
+    """Sync all registered repositories"""
     repos = await list_repos()
-    github_repos = [r for r in repos if (r.get("source") or "github") == "github"]
-    log.info(
-        "Scheduler tick: %d total, %d github repos to sync",
-        len(repos), len(github_repos),
-    )
-    for r in github_repos:
-        await sync_repo(r["id"], r["owner"], r["name"])
+    log.info("Scheduler tick: %d total repos to sync", len(repos))
+    
+    for r in repos:
+        source = r.get("source") or "github"
+        await sync_repo(r["id"], r["owner"], r["name"], source)
 
 
 def build_scheduler() -> AsyncIOScheduler:

@@ -106,6 +106,28 @@ CREATE INDEX IF NOT EXISTS feature_skills_repo_idx ON feature_skills (repo_id, m
 CREATE INDEX IF NOT EXISTS feature_skills_embedding_idx
     ON feature_skills USING hnsw (embedding vector_cosine_ops);
 
+CREATE TABLE IF NOT EXISTS commit_log (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    repo_id         UUID NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+    commit_sha      TEXT NOT NULL,
+    message         TEXT NOT NULL,
+    author          TEXT NOT NULL,
+    author_email    TEXT NOT NULL,
+    committed_at    TIMESTAMPTZ NOT NULL,
+    parents         TEXT[] NOT NULL DEFAULT '{}',
+    changed_files   JSONB NOT NULL DEFAULT '[]',
+    commit_summary  TEXT NOT NULL,
+    embedding       vector(768),
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE(repo_id, commit_sha)
+);
+
+CREATE INDEX IF NOT EXISTS commit_log_repo_idx ON commit_log (repo_id);
+CREATE INDEX IF NOT EXISTS commit_log_sha_idx ON commit_log (repo_id, commit_sha);
+CREATE INDEX IF NOT EXISTS commit_log_committed_at_idx ON commit_log (repo_id, committed_at DESC);
+CREATE INDEX IF NOT EXISTS commit_log_embedding_idx
+    ON commit_log USING hnsw (embedding vector_cosine_ops);
+
 CREATE TABLE IF NOT EXISTS chat_turns (
     id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     chat_id     TEXT NOT NULL,
@@ -138,8 +160,70 @@ CREATE TABLE IF NOT EXISTS sync_runs (
 );
 
 CREATE INDEX IF NOT EXISTS sync_runs_repo_idx ON sync_runs (repo_id, started_at DESC);
+
+CREATE TABLE IF NOT EXISTS organizations (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name            TEXT NOT NULL UNIQUE,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS purna_tokens (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    org_id          UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+    token_hash      TEXT NOT NULL UNIQUE,
+    label           TEXT,
+    revoked_at      TIMESTAMPTZ,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS workspaces (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    org_id          UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+    name            TEXT NOT NULL,
+    source_kind     TEXT NOT NULL DEFAULT 'code_repo',
+    config          JSONB NOT NULL DEFAULT '{}'::jsonb,
+    knowledge_path  TEXT NOT NULL,
+    repo_id         UUID REFERENCES repos(id) ON DELETE SET NULL,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (org_id, name)
+);
+
+CREATE TABLE IF NOT EXISTS knowledge_decisions (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    workspace_id    UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    event_type      TEXT NOT NULL,
+    action          TEXT NOT NULL,
+    reason          TEXT NOT NULL,
+    commit_sha      TEXT,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS knowledge_decisions_workspace_idx ON knowledge_decisions (workspace_id, created_at DESC);
 """
+
+
+async def seed_fake_token(conn: asyncpg.Connection) -> None:
+    import hashlib
+    # 1. Ensure "POC Demo Org" exists
+    org_id = await conn.fetchval(
+        "INSERT INTO organizations (name) VALUES ($1) ON CONFLICT (name) DO UPDATE SET name = EXCLUDED.name RETURNING id",
+        "POC Demo Org"
+    )
+    
+    # 2. Hash "purna_test_demo"
+    token_plaintext = "purna_test_demo"
+    token_hash = hashlib.sha256(token_plaintext.encode("utf-8")).hexdigest()
+    
+    # 3. Ensure token exists
+    await conn.execute(
+        "INSERT INTO purna_tokens (org_id, token_hash, label) VALUES ($1, $2, $3) ON CONFLICT (token_hash) DO NOTHING",
+        org_id,
+        token_hash,
+        "POC Demo Token"
+    )
 
 
 async def _ensure_schema(conn: asyncpg.Connection) -> None:
     await conn.execute(SCHEMA_SQL)
+    await seed_fake_token(conn)

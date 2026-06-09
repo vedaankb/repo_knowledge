@@ -10,6 +10,26 @@ import httpx
 GITHUB_API = "https://api.github.com"
 
 
+def _auth_headers(token: Optional[str] = None) -> dict:
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+        "User-Agent": "repo-knowledge-poc",
+    }
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
+
+
+async def _fetch_json(url: str, token: Optional[str] = None, params: Optional[dict] = None) -> Optional[dict]:
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        r = await client.get(url, headers=_auth_headers(token), params=params)
+        if r.status_code == 404:
+            return None
+        r.raise_for_status()
+        return r.json()
+
+
 _REPO_URL_RE = re.compile(
     r"^(?:https?://)?(?:www\.)?github\.com[/:]([^/\s]+)/([^/\s#?]+?)(?:\.git)?/?$"
 )

@@ -299,6 +299,52 @@ function renderOnboarding(main, chat) {
     errEl.hidden = false; errEl.textContent = msg;
   }
 
+  // Tab switching
+  const tabs = $$(".mode-tab", tpl);
+  const sections = $$(".onboarding-section", tpl);
+  tabs.forEach((tab) => {
+    tab.addEventListener("click", () => {
+      tabs.forEach((t) => t.classList.remove("active"));
+      tab.classList.add("active");
+      const mode = tab.dataset.mode;
+      sections.forEach((sec) => {
+        if (sec.id === `sec-${mode}`) {
+          sec.hidden = false;
+        } else {
+          sec.hidden = true;
+        }
+      });
+    });
+  });
+
+  // PurnaOS form
+  const purnaForm = tpl.querySelector('form[data-action="purna"]');
+  purnaForm.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    showErr(null);
+    const workspaceId = purnaForm.workspace_id.value.trim();
+    if (!workspaceId) return;
+    
+    const btn = purnaForm.querySelector('button[type="submit"]');
+    btn.disabled = true; btn.textContent = "Connecting...";
+    
+    try {
+      const res = await api(`/api/purna/workspaces/${workspaceId}`);
+      chat.repoId = res.repo_id;
+      chat.workspaceId = res.workspace_id;
+      chat.source = "purna_workspace";
+      chat.label = `${res.owner}/${res.repo_name} (PurnaOS)`;
+      chat.sub = `workspace: ${res.workspace_id.slice(0, 8)}`;
+      chat.status = "ready";
+      persist();
+      renderTabs();
+      renderMain();
+    } catch (err) {
+      btn.disabled = false; btn.textContent = "Connect";
+      showErr(err.message || String(err));
+    }
+  });
+
   const ghForm = tpl.querySelector('form[data-action="github"]');
   const tokenRow = ghForm.querySelector(".token-row");
   const tokenInput = tokenRow.querySelector('input[name="token"]');
@@ -495,6 +541,40 @@ function renderChat(main, chat) {
     persist();
     renderMain();
   });
+
+  // Render Agent Decisions Log
+  const agentLogPanel = tpl.querySelector("#agent-log-panel");
+  if (chat.source === "purna_workspace") {
+    agentLogPanel.hidden = false;
+    const logList = tpl.querySelector("#agent-log-list");
+    const logStatus = tpl.querySelector("#agent-log-status");
+    logList.innerHTML = "";
+    
+    const decisions = chat.decisions || [];
+    if (decisions.length === 0) {
+      logList.innerHTML = `<div class="muted small" style="padding: 10px;">No decisions logged yet. Save a file to trigger the sync agent.</div>`;
+      logStatus.textContent = "idle";
+    } else {
+      const last = decisions[0];
+      logStatus.textContent = `last check: ${last.action} (${last.reason})`;
+      
+      for (const d of decisions) {
+        const item = document.createElement("div");
+        item.className = "agent-log-item";
+        const dateStr = d.created_at ? new Date(d.created_at).toLocaleTimeString() : "";
+        item.innerHTML = `
+          <div class="agent-log-meta">
+            <span class="agent-action ${d.action}">${d.action}</span>
+            <span class="muted small">${dateStr}</span>
+          </div>
+          <div class="agent-log-reason">${escapeHtml(d.reason)}</div>
+        `;
+        logList.appendChild(item);
+      }
+    }
+  } else {
+    agentLogPanel.hidden = true;
+  }
 
   const composerWrap = tpl.querySelector(".composer-wrap");
   const composerHint = tpl.querySelector(".composer-hint");
@@ -912,7 +992,9 @@ async function refreshStatus(chat) {
     chat.lastRun = lr ? `${lr.kind} · ${lr.status}` : null;
     chat.sub = chat.source === "upload"
       ? `uploaded zip · branch (zip)`
-      : `branch: ${s.default_branch} · ${s.visibility} · sha ${(s.last_indexed_sha || "—").slice(0, 10)}`;
+      : chat.source === "purna_workspace"
+        ? `workspace: ${chat.workspaceId.slice(0, 8)}`
+        : `branch: ${s.default_branch} · ${s.visibility} · sha ${(s.last_indexed_sha || "—").slice(0, 10)}`;
     chat.label = s.label || `${s.owner}/${s.name}`;
     if (lr && lr.status === "error") {
       chat.status = "error";
@@ -921,6 +1003,16 @@ async function refreshStatus(chat) {
       // chunks are populating; keep "indexing" until user clicks "Open chat" OR auto-advance after first sync run finishes
       if (lr && lr.status === "success") {
         chat.status = "ready";
+      }
+    }
+
+    // Fetch workspace decisions if PurnaOS workspace
+    if (chat.source === "purna_workspace" && chat.workspaceId) {
+      try {
+        const decisions = await api(`/api/purna/workspaces/${chat.workspaceId}/decisions`);
+        chat.decisions = decisions || [];
+      } catch (e) {
+        // ignore
       }
     }
   } catch (e) {

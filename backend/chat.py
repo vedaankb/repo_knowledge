@@ -253,10 +253,15 @@ def _gen_sync(prompt: str, mode: str = "strict") -> str:
     api_key = require_current_gemini_key()
     genai.configure(api_key=api_key)
 
+    max_tokens = (
+        settings.max_output_tokens_plan
+        if mode == "plan"
+        else settings.max_output_tokens_strict
+    )
     generation_config = {
         "temperature": 0.4 if mode == "plan" else 0.1,
         "top_p": 0.9,
-        "max_output_tokens": 1536 if mode == "plan" else 1024,
+        "max_output_tokens": max_tokens,
     }
 
     # In plan mode, try to enable Google Search grounding so the model can pull
@@ -285,13 +290,36 @@ def _gen_sync(prompt: str, mode: str = "strict") -> str:
         model = genai.GenerativeModel(settings.gemini_chat_model)
         resp = model.generate_content(prompt, generation_config=generation_config)
 
+    text = ""
+    truncated = False
     if hasattr(resp, "text") and resp.text:
-        return resp.text.strip()
+        text = resp.text.strip()
+    else:
+        try:
+            parts = resp.candidates[0].content.parts
+            text = "".join(getattr(p, "text", "") for p in parts).strip()
+        except Exception:
+            text = ""
+
     try:
-        parts = resp.candidates[0].content.parts
-        return "".join(getattr(p, "text", "") for p in parts).strip()
+        finish = getattr(resp.candidates[0], "finish_reason", None)
+        # SDK may return enum name or int; MAX_TOKENS / STOP with length = cut off.
+        finish_name = (
+            finish.name if hasattr(finish, "name") else str(finish or "")
+        ).upper()
+        if "MAX_TOKENS" in finish_name or finish == 2:
+            truncated = True
     except Exception:
-        return ""
+        pass
+
+    if truncated and text:
+        text += (
+            "\n\n---\n"
+            "*Response reached the output length limit and may be incomplete. "
+            "Reply **continue** or ask a narrower follow-up (e.g. focus on one "
+            "OWASP category) to get the rest.*"
+        )
+    return text
 
 
 # Lightweight, LLM-free topic extractor.

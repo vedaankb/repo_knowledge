@@ -45,7 +45,9 @@ from .indexer import (
     start_sync_run,
     upsert_repo,
 )
+from .knowledge_importer import index_from_knowledge_repo, sync_knowledge_repo, import_commit_artifact, _upsert_chunk, apply_deletions
 from .scheduler import build_scheduler, sync_repo
+from .purna_control import validate_token, provision_workspace, log_decision, get_recent_decisions
 
 MAX_ZIP_BYTES = 100 * 1024 * 1024
 MAX_ZIP_ENTRIES = 20_000
@@ -117,6 +119,38 @@ async def _key_not_configured_handler(_request: Request, _exc: KeyNotConfiguredE
 
 class RegisterRepoRequest(BaseModel):
     url: str
+    token: Optional[str] = None
+
+
+class PurnaUnderstandRequest(BaseModel):
+    purna_token: str
+    repo_owner: str
+    repo_name: str
+    gemini_key: Optional[str] = None
+    probe_data: Optional[dict] = None
+
+
+class PurnaArtifactsRequest(BaseModel):
+    workspace_id: UUID
+    purna_token: str
+    commits: dict = Field(default_factory=dict)
+    chunks: dict = Field(default_factory=dict)
+    deleted: dict = Field(default_factory=dict)
+
+
+class PurnaEventRequest(BaseModel):
+    workspace_id: UUID
+    purna_token: str
+    file_path: str
+    diff: str
+    event_type: str = "file_edit"
+    is_new_file: bool = False
+
+
+class RegisterKnowledgeRepoRequest(BaseModel):
+    """Register a PurnaOS knowledge repository"""
+    url: str  # GitHub URL to knowledge repo (e.g., https://github.com/org/myapp-knowledge)
+    branch: str = "main"
     token: Optional[str] = None
 
 
@@ -207,6 +241,320 @@ async def register_repo(req: RegisterRepoRequest, bg: BackgroundTasks) -> dict:
     }
 
 
+@app.post("/api/purna/understand")
+async def purna_understand(req: PurnaUnderstandRequest) -> dict:
+    """
+    Validate PurnaOS token, auto-provision organization, workspace and linked repo row,
+    and return workspace configuration payload.
+    """
+    import json
+    org_id = await validate_token(req.purna_token)
+    workspace_id, repo_id = await provision_workspace(
+        org_id=org_id,
+        repo_owner=req.repo_owner,
+        repo_name=req.repo_name,
+        gemini_key=req.gemini_key,
+        probe_data=req.probe_data
+    )
+    
+    understanding = "Code repository workspace"
+    if req.probe_data and "readme_excerpt" in req.probe_data:
+        understanding = f"Workspace for {req.repo_owner}/{req.repo_name}. README: {req.probe_data['readme_excerpt'][:200]}"
+        
+    async with pool().acquire() as conn:
+        await conn.execute(
+            "UPDATE workspaces SET config = jsonb_set(config, '{understanding}', $1::jsonb) WHERE id = $2",
+            json.dumps(understanding),
+            workspace_id
+        )
+        
+    return {
+        "workspace_id": str(workspace_id),
+        "repo_id": str(repo_id),
+        "org_id": str(org_id),
+        "api_url": "http://localhost:8000",
+        "sync": {
+            "mode": "agent",
+            "debounce_ms": 3000
+        }
+    }
+
+
+@app.post("/api/purna/artifacts")
+async def purna_artifacts(req: PurnaArtifactsRequest) -> dict:
+    """
+    Upload chunk/commit JSON bundles to local knowledge store and import into pgvector.
+    """
+    import json
+    from datetime import datetime
+    
+    # 1. Validate token
+    org_id = await validate_token(req.purna_token)
+    
+    # 2. Verify workspace and get repo_id
+    async with pool().acquire() as conn:
+        ws = await conn.fetchrow(
+            "SELECT org_id, repo_id, knowledge_path FROM workspaces WHERE id = $1",
+            req.workspace_id
+        )
+    if not ws:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    if ws["org_id"] != org_id:
+        raise HTTPException(status_code=403, detail="Workspace does not belong to this organization")
+        
+    repo_id = ws["repo_id"]
+    knowledge_path = Path(ws["knowledge_path"])
+    
+    # 3. Save to local filesystem
+    (knowledge_path / "commits").mkdir(parents=True, exist_ok=True)
+    (knowledge_path / "deleted").mkdir(parents=True, exist_ok=True)
+    
+    # Save commits
+    for sha, commit_data in req.commits.items():
+        commit_file = knowledge_path / "commits" / f"{sha}.json"
+        with open(commit_file, "w") as f:
+            json.dump(commit_data, f, indent=2)
+            
+        # Import to database
+        await import_commit_artifact(repo_id, commit_data)
+        
+    # Save chunks
+    for sha, files_dict in req.chunks.items():
+        sha_dir = knowledge_path / "chunks" / sha
+        sha_dir.mkdir(parents=True, exist_ok=True)
+        for file_hash, chunks_list in files_dict.items():
+            chunk_file = sha_dir / f"{file_hash}.json"
+            with open(chunk_file, "w") as f:
+                json.dump(chunks_list, f, indent=2)
+                
+            # Import to database
+            for chunk in chunks_list:
+                await _upsert_chunk(repo_id, sha, chunk)
+                
+    # Save deleted
+    for sha, deleted_data in req.deleted.items():
+        deleted_file = knowledge_path / "deleted" / f"{sha}.json"
+        with open(deleted_file, "w") as f:
+            json.dump(deleted_data, f, indent=2)
+            
+        # Apply deletions to database
+        await apply_deletions(repo_id, deleted_data)
+        
+    # Update manifest.json
+    manifest_file = knowledge_path / "manifest.json"
+    manifest_data = {
+        "schema_version": 2,
+        "workspace_id": str(req.workspace_id),
+        "head_sha": list(req.commits.keys())[-1] if req.commits else None,
+        "updated_at": datetime.utcnow().isoformat() + "Z"
+    }
+    with open(manifest_file, "w") as f:
+        json.dump(manifest_data, f, indent=2)
+        
+    # Update repo last_indexed_sha and last_synced_at
+    if manifest_data["head_sha"]:
+        async with pool().acquire() as conn:
+            await conn.execute(
+                "UPDATE repos SET last_indexed_sha = $1, last_synced_at = now() WHERE id = $2",
+                manifest_data["head_sha"],
+                repo_id
+            )
+            
+    return {
+        "status": "success",
+        "commits_imported": len(req.commits),
+        "chunks_imported": sum(len(chunks) for sha in req.chunks.values() for chunks in sha.values()),
+        "files_deleted": sum(len(data.get("deleted_files", [])) for data in req.deleted.values())
+    }
+
+
+@app.post("/api/purna/events")
+async def purna_event(req: PurnaEventRequest) -> dict:
+    """
+    Receive an edit event from purna watch, run the sync agent to evaluate it,
+    log the decision, and return the action to the CLI.
+    """
+    import json
+    # 1. Validate token
+    org_id = await validate_token(req.purna_token)
+    
+    # 2. Verify workspace and get current understanding
+    async with pool().acquire() as conn:
+        ws = await conn.fetchrow(
+            "SELECT org_id, config FROM workspaces WHERE id = $1",
+            req.workspace_id
+        )
+    if not ws:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    if ws["org_id"] != org_id:
+        raise HTTPException(status_code=403, detail="Workspace does not belong to this organization")
+        
+    config = ws["config"] or {}
+    understanding = config.get("understanding", "Code repository workspace")
+    
+    # 3. Run sync agent decision
+    from .sync_agent import decide_sync_event
+    decision = await decide_sync_event(
+        understanding=understanding,
+        file_path=req.file_path,
+        diff=req.diff,
+        event_type=req.event_type,
+        is_new_file=req.is_new_file
+    )
+    
+    # 4. Log decision
+    await log_decision(
+        workspace_id=req.workspace_id,
+        event_type=req.event_type,
+        action=decision["action"],
+        reason=decision["reason"]
+    )
+    
+    # 5. If action is append and update_understanding is true, update workspace understanding
+    if decision["action"] == "append" and decision.get("update_understanding"):
+        # For POC, let's keep the same understanding but log it
+        pass
+        
+    return decision
+
+
+@app.get("/api/purna/workspaces/{workspace_id}/decisions")
+async def get_workspace_decisions(workspace_id: UUID) -> list[dict]:
+    """Get recent sync agent decisions for a workspace"""
+    rows = await get_recent_decisions(workspace_id)
+    for r in rows:
+        if r.get("created_at"):
+            r["created_at"] = r["created_at"].isoformat()
+        r["id"] = str(r["id"])
+    return rows
+
+
+@app.get("/api/purna/workspaces/{workspace_id}")
+async def get_workspace_status(workspace_id: UUID) -> dict:
+    """Get workspace status and linked repo details"""
+    async with pool().acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT w.id as workspace_id, w.name, w.org_id, w.repo_id, r.owner, r.name as repo_name, r.last_indexed_sha, r.last_synced_at
+            FROM workspaces w
+            LEFT JOIN repos r ON w.repo_id = r.id
+            WHERE w.id = $1
+            """,
+            workspace_id
+        )
+    if not row:
+        # Try fetching by repo_id instead to be flexible
+        async with pool().acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT w.id as workspace_id, w.name, w.org_id, w.repo_id, r.owner, r.name as repo_name, r.last_indexed_sha, r.last_synced_at
+                FROM workspaces w
+                LEFT JOIN repos r ON w.repo_id = r.id
+                WHERE w.repo_id = $1
+                """,
+                workspace_id
+            )
+    if not row:
+        raise HTTPException(status_code=404, detail="Workspace or Repo not found")
+        
+    return {
+        "workspace_id": str(row["workspace_id"]),
+        "name": row["name"],
+        "org_id": str(row["org_id"]),
+        "repo_id": str(row["repo_id"]),
+        "owner": row["owner"],
+        "repo_name": row["repo_name"],
+        "last_indexed_sha": row["last_indexed_sha"],
+        "last_synced_at": row["last_synced_at"].isoformat() if row["last_synced_at"] else None
+    }
+
+
+@app.post("/api/repos/knowledge")
+async def register_knowledge_repo(req: RegisterKnowledgeRepoRequest, bg: BackgroundTasks) -> dict:
+    """
+    Register a PurnaOS knowledge repository
+    Instead of indexing source code, imports pre-processed artifacts
+    """
+    try:
+        owner, name = parse_repo_url(req.url)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    
+    user_token = (req.token or "").strip() or None
+    if not user_token:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "token_required",
+                "message": "GitHub access token is required to access knowledge repository.",
+            },
+        )
+    
+    gemini_key = get_current_gemini_key()
+    if not gemini_key:
+        raise _key_required_exception()
+    
+    # Verify knowledge repo exists
+    try:
+        async with GitHubClient(token=user_token) as gh:
+            info = await gh.get_repo(owner, name)
+    except httpx.HTTPStatusError as e:
+        status = e.response.status_code
+        if status in (401, 403, 404):
+            raise HTTPException(
+                status_code=401,
+                detail={
+                    "code": "invalid_token",
+                    "message": "Could not access knowledge repository. Verify the URL and token.",
+                },
+            )
+        raise HTTPException(502, f"GitHub error: {e}")
+    except Exception as e:
+        raise HTTPException(404, f"Could not access knowledge repo {owner}/{name}: {e}")
+    
+    # Register as purna_knowledge source
+    repo_id = await upsert_repo(
+        owner, name, req.branch, info.visibility,
+        source="purna_knowledge",
+        label=f"Knowledge: {owner}/{name}",
+        github_token=user_token,
+        gemini_token=gemini_key,
+    )
+    
+    # Start importing artifacts in background
+    bg.add_task(_import_knowledge_task, repo_id, owner, name, req.branch, gemini_key)
+    
+    return {
+        "repo_id": str(repo_id),
+        "owner": owner,
+        "name": name,
+        "branch": req.branch,
+        "status": "importing",
+        "source": "purna_knowledge",
+    }
+
+
+async def _import_knowledge_task(
+    repo_id: UUID, 
+    owner: str, 
+    name: str, 
+    branch: str,
+    gemini_key: str
+):
+    """Background task to import knowledge repo artifacts"""
+    set_current_gemini_key(gemini_key)
+    
+    try:
+        log.info(f"Importing knowledge repo {owner}/{name}...")
+        stats = await index_from_knowledge_repo(repo_id, owner, name, branch=branch)
+        log.info(
+            f"Knowledge repo import complete: {stats['commits_imported']} commits, "
+            f"{stats['chunks_imported']} chunks, {stats['skills_imported']} skills"
+        )
+    except Exception as e:
+        log.error(f"Knowledge repo import failed for {owner}/{name}: {e}", exc_info=True)
+
+
 async def _initial_index_task(
     repo_id: UUID, owner: str, name: str, gemini_key: Optional[str] = None
 ) -> None:
@@ -251,7 +599,7 @@ async def sync_now(repo_id: UUID, bg: BackgroundTasks) -> dict:
     repo = await get_repo_row(repo_id)
     if not repo:
         raise HTTPException(404, "repo not found")
-    bg.add_task(sync_repo, repo_id, repo["owner"], repo["name"])
+    bg.add_task(sync_repo, repo_id, repo["owner"], repo["name"], source=repo.get("source") or "github")
     return {"status": "queued"}
 
 

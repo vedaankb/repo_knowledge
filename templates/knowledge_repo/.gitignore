@@ -1,0 +1,14 @@
+# Ignore local development files
+.DS_Store
+*.swp
+*.swo
+*~
+
+# Ignore editor directories
+.vscode/
+.idea/
+*.code-workspace
+
+# Ignore temporary files
+tmp/
+temp/
