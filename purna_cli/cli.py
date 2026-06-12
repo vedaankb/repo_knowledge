@@ -161,8 +161,18 @@ def cmd_status(args):
     cfg = config.load()
     state = config.load_state()
     
+    workspace_id = cfg.get("workspace_id")
+    repo_id = cfg.get("repo_id")
+    api_url = cfg.get("api_url", "http://localhost:8000")
+    
     print(f"PurnaOS Status")
     print(f"  Repo root: {repo_root}")
+    if workspace_id:
+        print(f"  Workspace ID: {workspace_id}")
+    if repo_id:
+        print(f"  Repository ID: {repo_id}")
+    if workspace_id:
+        print(f"  Connect URL: {api_url}/?workspace_id={workspace_id}")
     print(f"  Knowledge repo: {cfg.get('knowledge', {}).get('github', 'not configured')}")
     print(f"  Last published: {state.get('last_published_sha', 'never')[:8] if state.get('last_published_sha') else 'never'}")
     print(f"  Pending files: {len(state.get('pending_files', []))}")
@@ -331,7 +341,9 @@ def cmd_understand(args):
     state["gemini_key"] = gemini_key
     config.save_state(state)
     
-    print(f"✓ Provisioned workspace {workspace_id} (linked repo {repo_id})")
+    print(f"✓ Provisioned workspace: {workspace_id}")
+    print(f"✓ Linked repository ID:  {repo_id}")
+    print(f"🔗 Connect to this workspace in your browser: {api_url}/?workspace_id={workspace_id}")
     
     # 6. Run Baseline Index
     print("🚀 Running initial baseline index...")
@@ -384,6 +396,44 @@ def cmd_understand(args):
 def cmd_bootstrap(args):
     """Bootstrap a new knowledge repository"""
     return cmd_bootstrap_interactive()
+
+
+def cmd_delete(args):
+    """Delete PurnaOS configuration and local artifacts"""
+    repo_root = find_project_root()
+    
+    config = PurnaConfig(repo_root)
+    if not config.exists():
+        print("PurnaOS is not initialized or has already been removed from this repository.")
+        return 0
+        
+    # Ask for confirmation unless --yes is passed
+    if not args.yes:
+        try:
+            confirm = input("⚠️  Are you sure you want to delete the PurnaOS configuration and local database artifacts from this repository? (y/N): ").strip().lower()
+            if confirm not in ("y", "yes"):
+                print("Aborted.")
+                return 0
+        except KeyboardInterrupt:
+            print("\nAborted.")
+            return 0
+            
+    # Uninstall git hooks if they exist
+    if (repo_root / ".git").exists():
+        try:
+            uninstall_hooks(repo_root)
+        except Exception:
+            pass
+            
+    # Delete .purnaOS directory recursively
+    import shutil
+    try:
+        shutil.rmtree(config.purna_dir)
+        print("✓ Successfully removed .purnaOS configuration and cleared local artifacts.")
+        return 0
+    except Exception as e:
+        print(f"Error removing .purnaOS directory: {e}")
+        return 1
 
 
 def main():
@@ -441,6 +491,11 @@ def main():
     # bootstrap
     parser_bootstrap = subparsers.add_parser("bootstrap", help="Create new knowledge repository on GitHub")
     parser_bootstrap.set_defaults(func=cmd_bootstrap)
+    
+    # delete
+    parser_delete = subparsers.add_parser("delete", help="Delete PurnaOS configuration and local artifacts")
+    parser_delete.add_argument("--yes", "-y", action="store_true", help="Skip confirmation prompt")
+    parser_delete.set_defaults(func=cmd_delete)
     
     args = parser.parse_args()
     

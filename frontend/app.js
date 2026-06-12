@@ -8,7 +8,7 @@ const MAX_TABS = 5;
 const STORAGE_KEY = "repo_knowledge_session_v1";
 const GEMINI_KEY_LS = "repo_knowledge_gemini_key_v1";
 const PREFS_LS = "repo_knowledge_user_prefs_v1";
-const POLL_MS = 3000;
+const POLL_MS = 2000;
 
 /* ---- User-scoped settings (localStorage, survives reloads) ---- */
 function getGeminiKey() {
@@ -1089,11 +1089,18 @@ function startPolling() {
     for (const c of state.chats) {
       if (!c.repoId) continue;
       if (c.status === "indexing" || c.status === "ready" || c.status === "error") {
-        const before = JSON.stringify(c.counts);
+        const beforeCounts = JSON.stringify(c.counts);
+        const beforeDecisions = JSON.stringify(c.decisions || []);
         await refreshStatus(c);
-        if (JSON.stringify(c.counts) !== before) {
-          // file list might have changed - bust cache so @ autocomplete refetches
-          invalidateFileCache(c.repoId);
+        
+        const countsChanged = JSON.stringify(c.counts) !== beforeCounts;
+        const decisionsChanged = JSON.stringify(c.decisions || []) !== beforeDecisions;
+        
+        if (countsChanged || decisionsChanged) {
+          if (countsChanged) {
+            // file list might have changed - bust cache so @ autocomplete refetches
+            invalidateFileCache(c.repoId);
+          }
           if (c.id === state.activeId) needRender = true;
         }
       }
@@ -1188,6 +1195,62 @@ $("#new-chat").addEventListener("click", addChat);
   restore();
   if (state.chats.length === 0) addChat();
   if (!activeChat() && state.chats.length > 0) state.activeId = state.chats[0].id;
+
+  // Auto-connect workspace from query parameter
+  const params = new URLSearchParams(window.location.search);
+  const workspaceId = params.get("workspace_id");
+  if (workspaceId) {
+    const existing = state.chats.find(c => c.workspaceId === workspaceId);
+    if (existing) {
+      setActive(existing.id);
+      const url = new URL(window.location);
+      url.searchParams.delete("workspace_id");
+      window.history.replaceState({}, document.title, url.toString());
+    } else {
+      let chat = state.chats.find(c => c.status === "onboarding" && !c.repoId);
+      if (!chat) {
+        if (state.chats.length >= MAX_TABS) {
+          const onboardingIdx = state.chats.findIndex(c => c.status === "onboarding");
+          if (onboardingIdx !== -1) {
+            closeChat(state.chats[onboardingIdx].id);
+          } else {
+            closeChat(state.chats[0].id);
+          }
+        }
+        chat = newChat();
+        state.chats.push(chat);
+      }
+      chat.status = "indexing"; // Show a temporary loading state
+      chat.label = "Connecting workspace...";
+      setActive(chat.id);
+      
+      api(`/api/purna/workspaces/${workspaceId}`)
+        .then((res) => {
+          chat.repoId = res.repo_id;
+          chat.workspaceId = res.workspace_id;
+          chat.source = "purna_workspace";
+          chat.label = `${res.owner}/${res.repo_name} (PurnaOS)`;
+          chat.sub = `workspace: ${res.workspace_id.slice(0, 8)}`;
+          chat.status = "ready";
+          persist();
+          renderTabs();
+          renderMain();
+          
+          const url = new URL(window.location);
+          url.searchParams.delete("workspace_id");
+          window.history.replaceState({}, document.title, url.toString());
+        })
+        .catch((err) => {
+          console.error("Failed to auto-connect workspace:", err);
+          chat.status = "onboarding";
+          chat.statusMsg = err.message || String(err);
+          persist();
+          renderTabs();
+          renderMain();
+        });
+    }
+  }
+
   wireSidebarSettings();
   renderSidebarSettings();
   renderTabs();

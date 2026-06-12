@@ -1,0 +1,725 @@
+{
+  "sha": "local-636a4598d9fdf884",
+  "message": "Filesystem baseline index",
+  "author": "purna",
+  "author_email": "purna@local",
+  "committed_at": "2026-06-12T14:53:37.852971+00:00",
+  "parents": [],
+  "changed_files": [
+    {
+      "path": ".env.example",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "Dockerfile",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "README.md",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "alembic.ini",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "alembic/env.py",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "alembic/script.py.mako",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "alembic/versions/001_add_readiness_and_virtual_cards.py",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "alembic/versions/444df50207a1_add_payment_link_token_column.py",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "alembic/versions/90c6154fafc1_merge_heads.py",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "alembic/versions/bc332f71df41_initial_schema.py",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "alembic/versions/d0cf49f69bb1_add_service_fee_type_and_percentage.py",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "app/__init__.py",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "app/api/__init__.py",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "app/api/deps.py",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "app/api/deps_bill.py",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "app/api/routes/__init__.py",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "app/api/routes/assignments.py",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "app/api/routes/auth.py",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "app/api/routes/bill_ws.py",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "app/api/routes/bills.py",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "app/api/routes/dashboard.py",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "app/api/routes/debug.py",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "app/api/routes/internal_jobs.py",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "app/api/routes/invite_public.py",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "app/api/routes/invites.py",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "app/api/routes/members.py",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "app/api/routes/notifications.py",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "app/api/routes/party_public.py",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "app/api/routes/pay_public.py",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "app/api/routes/payment_methods.py",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "app/api/routes/payments.py",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "app/api/routes/receipts.py",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "app/api/routes/users.py",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "app/api/routes/virtual_cards.py",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "app/core/__init__.py",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "app/core/config.py",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "app/core/response.py",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "app/core/security.py",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "app/db/__init__.py",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "app/db/base.py",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "app/db/session.py",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "app/limiter.py",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "app/main.py",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "app/middleware/__init__.py",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "app/middleware/error_handler.py",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "app/models/__init__.py",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "app/models/bill.py",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "app/models/bill_member.py",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "app/models/item_assignment.py",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "app/models/notification.py",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "app/models/payment.py",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "app/models/payment_method.py",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "app/models/receipt.py",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "app/models/receipt_item.py",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "app/models/settlement.py",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "app/models/sms_log.py",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "app/models/user.py",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "app/models/virtual_card.py",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "app/schemas/__init__.py",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "app/schemas/auth.py",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "app/schemas/bill.py",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "app/schemas/bill_member.py",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "app/schemas/common.py",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "app/schemas/dashboard.py",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "app/schemas/item_assignment.py",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "app/schemas/notification.py",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "app/schemas/payment.py",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "app/schemas/payment_method.py",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "app/schemas/receipt.py",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "app/schemas/user.py",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "app/schemas/virtual_card.py",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "app/services/__init__.py",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "app/services/apple_auth_service.py",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "app/services/auth_service.py",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "app/services/bill_service.py",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "app/services/calculation_service.py",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "app/services/notification_service.py",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "app/services/otp_service.py",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "app/services/payment_method_service.py",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "app/services/payment_notification_service.py",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "app/services/payment_service.py",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "app/services/readiness_service.py",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "app/services/receipt_parser_service.py",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "app/services/reminder_service.py",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "app/services/sms_service.py",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "app/services/virtual_card_service.py",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "app/services/ws_manager.py",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "app/utils/__init__.py",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "app/utils/helpers.py",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "app/utils/phone.py",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "app/utils/phone_format.py",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "app/utils/phone_rate_limit.py",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "apple_signin_example.html",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "docker-compose.yml",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "main.py",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "migration_add_apple_auth.sql",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "migration_bill_readiness.sql",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "migration_payment_methods.sql",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "migration_phone_unique.sql",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "migration_sms_notifications.sql",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "pytest.ini",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "requirements.txt",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "scripts/__init__.py",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "scripts/seed.py",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "static/invite.html",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "test_local.py",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "test_stripe.py",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "tests/__init__.py",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "tests/conftest.py",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "tests/test_bill_websocket.py",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "tests/test_calculation_service.py",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "tests/test_deps_bill.py",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "tests/test_notification_service.py",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "tests/test_pay_public.py",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "tests/test_payment_notifications.py",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "tests/test_production_safety.py",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "tests/test_readiness_service.py",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "tests/test_receipt_parser_service.py",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "tests/test_virtual_card_service.py",
+      "status": "added",
+      "additions": 0,
+      "deletions": 0
+    }
+  ],
+  "commit_summary": "Filesystem baseline index. Indexed 119 files."
+}
