@@ -270,6 +270,21 @@ function renderTabs() {
 
 function renderMain() {
   const main = $("#main");
+  
+  // Save input state if active
+  let activeElementId = null;
+  let activeElementValue = null;
+  let activeElementSelectionStart = null;
+  let activeElementSelectionEnd = null;
+  
+  const activeEl = document.activeElement;
+  if (activeEl && (activeEl.classList.contains("composer-input") || activeEl.classList.contains("scope-input"))) {
+    activeElementId = activeEl.classList.contains("composer-input") ? "composer-input" : "scope-input";
+    activeElementValue = activeEl.value;
+    activeElementSelectionStart = activeEl.selectionStart;
+    activeElementSelectionEnd = activeEl.selectionEnd;
+  }
+
   main.innerHTML = "";
   const chat = activeChat();
   if (!chat) {
@@ -288,6 +303,20 @@ function renderMain() {
     renderIndexing(main, chat);
   } else if (chat.status === "ready" || chat.status === "error") {
     renderChat(main, chat);
+    
+    // Restore input state
+    if (activeElementId) {
+      const newEl = activeElementId === "composer-input" 
+        ? main.querySelector(".composer-input") 
+        : main.querySelector(".scope-input");
+      if (newEl) {
+        newEl.value = activeElementValue;
+        newEl.focus();
+        try {
+          newEl.setSelectionRange(activeElementSelectionStart, activeElementSelectionEnd);
+        } catch (e) {}
+      }
+    }
   }
 }
 
@@ -544,36 +573,60 @@ function renderChat(main, chat) {
 
   // Render Agent Decisions Log
   const agentLogPanel = tpl.querySelector("#agent-log-panel");
+  const toggleLogBtn = tpl.querySelector('[data-action="toggle-log"]');
+  
   if (chat.source === "purna_workspace") {
-    agentLogPanel.hidden = false;
-    const logList = tpl.querySelector("#agent-log-list");
-    const logStatus = tpl.querySelector("#agent-log-status");
-    logList.innerHTML = "";
-    
-    const decisions = chat.decisions || [];
-    if (decisions.length === 0) {
-      logList.innerHTML = `<div class="muted small" style="padding: 10px;">No decisions logged yet. Save a file to trigger the sync agent.</div>`;
-      logStatus.textContent = "idle";
+    toggleLogBtn.hidden = false;
+    toggleLogBtn.textContent = chat.agentLogClosed ? "Show Log" : "Hide Log";
+    toggleLogBtn.addEventListener("click", () => {
+      chat.agentLogClosed = !chat.agentLogClosed;
+      persist();
+      renderMain();
+    });
+
+    if (chat.agentLogClosed) {
+      agentLogPanel.hidden = true;
     } else {
-      const last = decisions[0];
-      logStatus.textContent = `last check: ${last.action} (${last.reason})`;
+      agentLogPanel.hidden = false;
+      const logList = tpl.querySelector("#agent-log-list");
+      const logStatus = tpl.querySelector("#agent-log-status");
+      logList.innerHTML = "";
       
-      for (const d of decisions) {
-        const item = document.createElement("div");
-        item.className = "agent-log-item";
-        const dateStr = d.created_at ? new Date(d.created_at).toLocaleTimeString() : "";
-        item.innerHTML = `
-          <div class="agent-log-meta">
-            <span class="agent-action ${d.action}">${d.action}</span>
-            <span class="muted small">${dateStr}</span>
-          </div>
-          <div class="agent-log-reason">${escapeHtml(d.reason)}</div>
-        `;
-        logList.appendChild(item);
+      const decisions = chat.decisions || [];
+      if (decisions.length === 0) {
+        logList.innerHTML = `<div class="muted small" style="padding: 10px;">No decisions logged yet. Save a file to trigger the sync agent.</div>`;
+        logStatus.textContent = "idle";
+      } else {
+        const last = decisions[0];
+        logStatus.textContent = `last check: ${last.action} (${last.reason})`;
+        
+        for (const d of decisions) {
+          const item = document.createElement("div");
+          item.className = "agent-log-item";
+          const dateStr = d.created_at ? new Date(d.created_at).toLocaleTimeString() : "";
+          item.innerHTML = `
+            <div class="agent-log-meta">
+              <span class="agent-action ${d.action}">${d.action}</span>
+              <span class="muted small">${dateStr}</span>
+            </div>
+            <div class="agent-log-reason">${escapeHtml(d.reason)}</div>
+          `;
+          logList.appendChild(item);
+        }
+      }
+
+      const closeLogBtn = tpl.querySelector("#agent-log-close");
+      if (closeLogBtn) {
+        closeLogBtn.addEventListener("click", () => {
+          chat.agentLogClosed = true;
+          persist();
+          renderMain();
+        });
       }
     }
   } else {
     agentLogPanel.hidden = true;
+    if (toggleLogBtn) toggleLogBtn.hidden = true;
   }
 
   const composerWrap = tpl.querySelector(".composer-wrap");
@@ -583,6 +636,8 @@ function renderChat(main, chat) {
   const popup = tpl.querySelector(".mention-popup");
   const form = tpl.querySelector("form.composer");
   const input = tpl.querySelector(".composer-input");
+
+  input.value = chat.inputValue || "";
 
   // Prefetch file list so the popup pops instantly on first '@'.
   getRepoFiles(chat.repoId);
@@ -606,7 +661,7 @@ function renderChat(main, chat) {
       ? "PLAN mode · repo + general knowledge + (web if available)"
       : "Strict mode · only your repo";
   }
-  renderTags({ mode: "strict", filePaths: [] });
+  renderTags(parseComposer(input.value));
 
   /* ---- @ mention popup ---- */
   let mention = { active: false, start: -1, query: "", items: [], cursor: 0 };
@@ -672,6 +727,7 @@ function renderChat(main, chat) {
     const after = input.value.slice(input.selectionStart ?? input.value.length);
     const insert = "@" + item.file + " ";
     input.value = before + insert + after;
+    chat.inputValue = input.value;
     const newPos = (before + insert).length;
     input.setSelectionRange(newPos, newPos);
     hidePopup();
@@ -680,6 +736,7 @@ function renderChat(main, chat) {
   }
 
   input.addEventListener("input", () => {
+    chat.inputValue = input.value;
     renderTags(parseComposer(input.value));
     maybeOpenMention();
   });
@@ -732,6 +789,7 @@ function renderChat(main, chat) {
         pushSystem(chat, `Already remembered: "${body}".`);
       }
       renderSidebarSettings();
+      chat.inputValue = "";
       input.value = "";
       renderTags({ mode: "strict", filePaths: [] });
       hidePopup();
@@ -750,6 +808,7 @@ function renderChat(main, chat) {
         pushSystem(chat, n ? `Forgot ${n} preference${n === 1 ? "" : "s"} matching "${body}".` : `No preference matched "${body}".`);
       }
       renderSidebarSettings();
+      chat.inputValue = "";
       input.value = "";
       renderTags({ mode: "strict", filePaths: [] });
       hidePopup();
@@ -761,6 +820,7 @@ function renderChat(main, chat) {
     if (!parsed.question) return;
     chat.commitScope = (scopeInput.value || "").trim() || null;
     persist();
+    chat.inputValue = "";
     input.value = "";
     renderTags({ mode: "strict", filePaths: [] });
     hidePopup();

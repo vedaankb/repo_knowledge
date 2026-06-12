@@ -6,7 +6,13 @@ import sys
 from pathlib import Path
 import argparse
 
-from .config import PurnaConfig, find_repo_root
+from dotenv import load_dotenv
+
+# Load repo_knowledge .env so POC GEMINI_API_KEY is available without export
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+
+from .config import PurnaConfig, find_project_root
+from .fs_index import get_project_identity
 from .hooks import install_hooks, uninstall_hooks
 from .snapshot import create_snapshot
 from .publish import publish_to_knowledge_repo, upload_local_artifacts
@@ -14,11 +20,8 @@ from .bootstrap import cmd_bootstrap_interactive
 
 
 def cmd_init(args):
-    """Initialize .purnaOS in current repository"""
-    repo_root = find_repo_root()
-    if not repo_root:
-        print("Error: Not in a git repository")
-        return 1
+    """Initialize .purnaOS in current project directory"""
+    repo_root = find_project_root()
     
     config = PurnaConfig(repo_root)
     
@@ -66,10 +69,10 @@ def cmd_init(args):
 
 
 def cmd_install(args):
-    """Install git hooks"""
-    repo_root = find_repo_root()
-    if not repo_root:
-        print("Error: Not in a git repository")
+    """Install git hooks (optional; requires git)"""
+    repo_root = find_project_root()
+    if not (repo_root / ".git").exists():
+        print("Error: git hooks require a git repository (.git not found)")
         return 1
     
     config = PurnaConfig(repo_root)
@@ -83,10 +86,10 @@ def cmd_install(args):
 
 
 def cmd_uninstall(args):
-    """Uninstall git hooks"""
-    repo_root = find_repo_root()
-    if not repo_root:
-        print("Error: Not in a git repository")
+    """Uninstall git hooks (optional; requires git)"""
+    repo_root = find_project_root()
+    if not (repo_root / ".git").exists():
+        print("Error: git hooks require a git repository (.git not found)")
         return 1
     
     success, message = uninstall_hooks(repo_root)
@@ -95,11 +98,8 @@ def cmd_uninstall(args):
 
 
 def cmd_snapshot(args):
-    """Create commit snapshot"""
-    repo_root = find_repo_root()
-    if not repo_root:
-        print("Error: Not in a git repository")
-        return 1
+    """Create filesystem snapshot of the project"""
+    repo_root = find_project_root()
     
     config = PurnaConfig(repo_root)
     if not config.exists():
@@ -125,10 +125,7 @@ def cmd_snapshot(args):
 
 def cmd_publish(args):
     """Publish artifacts to knowledge repo"""
-    repo_root = find_repo_root()
-    if not repo_root:
-        print("Error: Not in a git repository")
-        return 1
+    repo_root = find_project_root()
     
     config = PurnaConfig(repo_root)
     if not config.exists():
@@ -154,10 +151,7 @@ def cmd_publish(args):
 
 def cmd_status(args):
     """Show purna status"""
-    repo_root = find_repo_root()
-    if not repo_root:
-        print("Error: Not in a git repository")
-        return 1
+    repo_root = find_project_root()
     
     config = PurnaConfig(repo_root)
     if not config.exists():
@@ -178,11 +172,8 @@ def cmd_status(args):
 
 
 def cmd_watch(args):
-    """Watch repository for changes"""
-    repo_root = find_repo_root()
-    if not repo_root:
-        print("Error: Not in a git repository")
-        return 1
+    """Watch project directory for changes"""
+    repo_root = find_project_root()
     
     config = PurnaConfig(repo_root)
     if not config.exists():
@@ -202,7 +193,6 @@ def cmd_watch(args):
 
 
 def probe_repository(repo_root: Path) -> dict:
-    from .utils import git_command
     probe = {
         "default_branch": "main",
         "visibility": "private",
@@ -210,11 +200,7 @@ def probe_repository(repo_root: Path) -> dict:
         "languages": [],
         "layout": []
     }
-    try:
-        probe["default_branch"] = git_command(["rev-parse", "--abbrev-ref", "HEAD"], cwd=repo_root)
-    except Exception:
-        pass
-        
+
     readme_path = repo_root / "README.md"
     if not readme_path.exists():
         readme_path = repo_root / "readme.md"
@@ -261,11 +247,7 @@ def probe_repository(repo_root: Path) -> dict:
 
 def cmd_understand(args):
     """Run unified onboarding with purna understand"""
-    repo_root = find_repo_root()
-    if not repo_root:
-        print("Error: Not in a git repository")
-        return 1
-        
+    repo_root = find_project_root()
     config = PurnaConfig(repo_root)
     config.ensure_dirs()
     
@@ -295,13 +277,8 @@ def cmd_understand(args):
         
     api_url = args.api_url or os.getenv("PURNA_API_URL", "http://localhost:8000")
     
-    # 3. Probe repository
-    from .utils import get_repo_owner_name
-    try:
-        repo_owner, repo_name = get_repo_owner_name(repo_root)
-    except Exception:
-        repo_owner, repo_name = "local", repo_root.name
-    
+    # 3. Probe project directory (filesystem — no git)
+    repo_owner, repo_name = get_project_identity(repo_root)
     probe_data = probe_repository(repo_root)
     
     # 4. Call POST /api/purna/understand
@@ -371,7 +348,9 @@ def cmd_understand(args):
         
     # 7. Upload Baseline Artifacts
     print("📤 Uploading baseline artifacts to PurnaOS...")
-    success, message = asyncio.run(upload_local_artifacts(repo_root, config, api_url, purna_token))
+    success, message = asyncio.run(
+        upload_local_artifacts(repo_root, config, api_url, purna_token, gemini_key)
+    )
     print(message)
     if not success:
         print("Error: Baseline artifact upload failed")

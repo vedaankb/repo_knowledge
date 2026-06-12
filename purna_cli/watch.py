@@ -10,14 +10,22 @@ from watchdog.events import FileSystemEventHandler, FileModifiedEvent, FileCreat
 
 from .config import PurnaConfig
 from .chunking import process_file, should_skip_file
+from .fs_index import (
+    SKIP_WALK_DIRS,
+    WORKING_SNAPSHOT_ID,
+    compute_text_diff,
+    load_baseline_content,
+    save_baseline_content,
+)
 from .utils import content_hash, file_path_hash
 
 
 class DeboucedFileHandler(FileSystemEventHandler):
     """Debounced file system event handler"""
     
-    def __init__(self, config: PurnaConfig, debounce_ms: int = 3000):
+    def __init__(self, config: PurnaConfig, repo_root: Path, debounce_ms: int = 3000):
         self.config = config
+        self.repo_root = repo_root.resolve()
         self.debounce_seconds = debounce_ms / 1000.0
         self.pending_files: Set[str] = set()
         self.last_event_time = 0
@@ -35,19 +43,29 @@ class DeboucedFileHandler(FileSystemEventHandler):
     
     def _mark_pending(self, path: str):
         """Mark a file as pending for processing"""
-        # Skip hidden files, temp files, and files in .purnaOS
-        if '/.purnaOS/' in path or path.startswith('.'):
+        full_path = Path(path)
+        if not full_path.is_file():
             return
-        
-        # Skip if file doesn't exist (could be deleted)
-        if not Path(path).exists():
+
+        try:
+            rel = full_path.resolve().relative_to(self.repo_root).as_posix()
+        except ValueError:
             return
-        
-        # Skip large/binary files
-        if should_skip_file(path):
+
+        parts = rel.split("/")
+        if any(part in SKIP_WALK_DIRS for part in parts):
             return
-        
-        self.pending_files.add(path)
+
+        base = parts[-1]
+        if base.startswith(".") and base not in {
+            ".env.example", ".env.sample", ".env.template",
+        }:
+            return
+
+        if should_skip_file(str(full_path)):
+            return
+
+        self.pending_files.add(str(full_path))
         self.last_event_time = time.time()
     
     async def get_debounced_files(self) -> Set[str]:
@@ -62,31 +80,14 @@ class DeboucedFileHandler(FileSystemEventHandler):
             return files
 
 
-def compute_diff(file_path_rel: str, content: str, repo_root: Path) -> tuple[str, bool]:
-    from .utils import git_command
-    is_new_file = False
-    try:
-        status = git_command(["status", "--porcelain", file_path_rel], cwd=repo_root)
-        if status.startswith("??"):
-            is_new_file = True
-            diff_lines = [f"+{line}" for line in content.splitlines()]
-            diff = "\n".join(diff_lines[:100])
-            if len(diff) > 4000:
-                diff = diff[:4000] + "\n... [diff truncated] ..."
-            return diff, is_new_file
-            
-        diff = git_command(["diff", "HEAD", "--", file_path_rel], cwd=repo_root)
-        if not diff.strip():
-            diff = git_command(["diff", "--cached", "--", file_path_rel], cwd=repo_root)
-        if len(diff) > 4000:
-            diff = diff[:4000] + "\n... [diff truncated] ..."
-        return diff, is_new_file
-    except Exception:
-        diff_lines = [f"+{line}" for line in content.splitlines()]
-        diff = "\n".join(diff_lines[:100])
-        if len(diff) > 4000:
-            diff = diff[:4000] + "\n... [diff truncated] ..."
-        return diff, True
+def compute_diff(
+    file_path_rel: str,
+    content: str,
+    config: PurnaConfig,
+) -> tuple[str, bool]:
+    """Diff against last indexed content on disk — no git."""
+    old_content = load_baseline_content(config.local_dir, file_path_rel)
+    return compute_text_diff(file_path_rel, old_content, content)
 
 
 async def process_pending_files(
@@ -129,9 +130,13 @@ async def process_pending_files(
                 if existing and existing[0].get('content_hash') == new_hash:
                     continue  # Content unchanged, skip
             
-            # 1. Compute diff and check if new file
-            diff, is_new_file = compute_diff(file_path_rel, content, repo_root)
-            
+            # 1. Compute cumulative diff against last memory-committed content
+            diff, is_new_file = compute_diff(file_path_rel, content, config)
+
+            # No accumulated change (no-op save or revert to memory state)
+            if not diff.strip() and not is_new_file:
+                continue
+
             # 2. Load workspace config and state
             workspace_cfg = config.load_workspace()
             workspace_id = workspace_cfg.get("workspace_id")
@@ -146,6 +151,7 @@ async def process_pending_files(
                 
             # 3. Call POST /api/purna/events
             import httpx
+            headers = {"X-Gemini-Key": gemini_key} if gemini_key else {}
             async with httpx.AsyncClient(timeout=30.0) as client:
                 resp = await client.post(
                     f"{api_url}/api/purna/events",
@@ -156,7 +162,8 @@ async def process_pending_files(
                         "diff": diff,
                         "event_type": "file_edit",
                         "is_new_file": is_new_file
-                    }
+                    },
+                    headers=headers,
                 )
                 if resp.status_code != 200:
                     print(f"✗ {file_path_rel}: Event check failed: {resp.text}")
@@ -171,25 +178,46 @@ async def process_pending_files(
                     file_path_rel,
                     content,
                     repo_root,
-                    "working",  # Pseudo-SHA for uncommitted changes
+                    WORKING_SNAPSHOT_ID,
                     gemini_key
                 )
                 
                 if chunks:
-                    # Save to staging
                     import json
                     with open(staging_file, 'w') as f:
                         json.dump(chunks, f, indent=2)
-                    
-                    # Immediately upload to artifacts!
-                    from .publish import upload_local_artifacts
-                    success, msg = await upload_local_artifacts(repo_root, config, api_url, purna_token)
-                    if success:
+
+                    # Persist under chunks/working/ so future snapshots include it
+                    working_dir = config.local_dir / "chunks" / WORKING_SNAPSHOT_ID
+                    working_dir.mkdir(parents=True, exist_ok=True)
+                    with open(working_dir / f"{file_hash}.json", 'w') as f:
+                        json.dump(chunks, f, indent=2)
+
+                    save_baseline_content(config.local_dir, file_path_rel, content)
+
+                    # Upload ONLY this file's chunks (keeps timestamps of
+                    # untouched chunks intact for new-vs-old questions)
+                    async with httpx.AsyncClient(timeout=60.0) as client:
+                        resp = await client.post(
+                            f"{api_url}/api/purna/artifacts",
+                            json={
+                                "workspace_id": workspace_id,
+                                "purna_token": purna_token,
+                                "commits": {},
+                                "chunks": {WORKING_SNAPSHOT_ID: {file_hash: chunks}},
+                                "deleted": {},
+                            },
+                            headers=headers,
+                        )
+                    if resp.status_code == 200:
                         print(f"✓ {file_path_rel}: Successfully chunked, embedded, and uploaded")
                         processed_count += len(chunks)
                     else:
-                        print(f"✗ {file_path_rel}: Upload failed: {msg}")
+                        print(f"✗ {file_path_rel}: Upload failed: {resp.text}")
             elif decision["action"] == "skip":
+                # Do NOT advance the baseline: the change stays staged so the
+                # agent always sees the CUMULATIVE diff since the last memory
+                # update. Many small skips can add up to a later append.
                 print(f"⤼ {file_path_rel}: Agent decided to SKIP ({decision['reason']})")
             elif decision["action"] == "defer":
                 print(f"⏳ {file_path_rel}: Agent decided to DEFER ({decision['reason']})")
@@ -224,7 +252,7 @@ async def watch_repository(
     print()
     
     # Create handler and observer
-    handler = DeboucedFileHandler(config, debounce_ms)
+    handler = DeboucedFileHandler(config, repo_root, debounce_ms)
     observer = Observer()
     observer.schedule(handler, str(repo_root), recursive=True)
     observer.start()
@@ -257,7 +285,7 @@ async def watch_once(
     cfg = config.load()
     debounce_ms = cfg.get("sync", {}).get("debounce_ms", 3000)
     
-    handler = DeboucedFileHandler(config, debounce_ms)
+    handler = DeboucedFileHandler(config, repo_root, debounce_ms)
     observer = Observer()
     observer.schedule(handler, str(repo_root), recursive=True)
     observer.start()

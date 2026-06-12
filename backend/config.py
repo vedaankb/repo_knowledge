@@ -7,7 +7,7 @@ class Settings(BaseSettings):
 
     gemini_api_key: str = ""
     gemini_embed_model: str = "text-embedding-004"
-    gemini_chat_model: str = "gemini-1.5-flash"
+    gemini_chat_model: str = "gemini-2.5-flash"
 
     github_token: str | None = None
 

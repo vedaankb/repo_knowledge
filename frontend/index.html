@@ -151,6 +151,7 @@
           <div class="chat-sub muted small"></div>
         </div>
         <div class="chat-actions">
+          <button class="btn-ghost" data-action="toggle-log" title="Toggle Agent Log" hidden>Agent Log</button>
           <button class="btn-ghost" data-action="sync" title="Trigger delta sync">Sync</button>
           <button class="btn-ghost" data-action="status" title="Refresh status">Status</button>
         </div>
@@ -160,8 +161,11 @@
       <!-- Agent Decisions Log Panel -->
       <div class="agent-log-panel" id="agent-log-panel" hidden>
         <div class="agent-log-header">
-          <span>PurnaOS LLM Sync Agent Log</span>
-          <span class="muted small" id="agent-log-status">idle</span>
+          <div class="agent-log-header-title">
+            <span>PurnaOS LLM Sync Agent Log</span>
+            <span class="muted small" id="agent-log-status">idle</span>
+          </div>
+          <button class="agent-log-close" id="agent-log-close" title="Close Log">×</button>
         </div>
         <div class="agent-log-list" id="agent-log-list">
           <!-- Log items will render here -->

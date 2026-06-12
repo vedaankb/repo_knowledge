@@ -8,7 +8,7 @@ from typing import Optional
 import httpx
 
 from .config import PurnaConfig
-from .utils import get_current_sha
+from .fs_index import synthetic_snapshot_id
 
 
 async def publish_to_knowledge_repo(
@@ -34,7 +34,7 @@ async def publish_to_knowledge_repo(
     
     # Load state
     state = config.load_state()
-    current_sha = get_current_sha(repo_root)
+    current_sha = state.get("last_snapshot_sha") or synthetic_snapshot_id(repo_root)
     
     # Check if already published
     if not force and state.get("last_published_sha") == current_sha:
@@ -171,6 +171,7 @@ async def upload_local_artifacts(
     config: PurnaConfig,
     api_url: str,
     purna_token: str,
+    gemini_key: Optional[str] = None,
 ) -> tuple[bool, str]:
     """
     Upload local artifacts to PurnaOS backend
@@ -179,6 +180,10 @@ async def upload_local_artifacts(
     workspace_id = workspace_cfg.get("workspace_id")
     if not workspace_id:
         return False, "workspace_id not found in workspace.yaml"
+
+    if not gemini_key:
+        state = config.load_state()
+        gemini_key = state.get("gemini_key")
         
     local_dir = config.local_dir
     payload = {
@@ -224,16 +229,21 @@ async def upload_local_artifacts(
                 pass
                 
     # Send request
+    headers = {}
+    if gemini_key:
+        headers["X-Gemini-Key"] = gemini_key
+
     async with httpx.AsyncClient(timeout=60.0) as client:
         try:
             resp = await client.post(
                 f"{api_url}/api/purna/artifacts",
-                json=payload
+                json=payload,
+                headers=headers,
             )
             if resp.status_code == 200:
                 # Update state
                 state = config.load_state()
-                current_sha = get_current_sha(repo_root)
+                current_sha = state.get("last_snapshot_sha") or synthetic_snapshot_id(repo_root)
                 state["last_published_sha"] = current_sha
                 state["last_published_at"] = datetime.utcnow().isoformat() + "Z"
                 state["pending_files"] = []

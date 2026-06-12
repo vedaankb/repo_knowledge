@@ -2,8 +2,8 @@
 
 import asyncio
 import json
-from datetime import datetime
-from typing import Optional
+from datetime import datetime, timezone
+from typing import Optional, Union
 from uuid import UUID
 import httpx
 
@@ -64,6 +64,17 @@ async def list_directory(
     return []
 
 
+def _parse_committed_at(value: Union[str, datetime]) -> datetime:
+    """Parse ISO timestamps from CLI/git artifacts for asyncpg TIMESTAMPTZ."""
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    text = str(value).strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    dt = datetime.fromisoformat(text)
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
 async def import_commit_artifact(repo_id: UUID, commit_data: dict):
     """Import a single commit artifact into commit_log table"""
     from .embeddings import embed_texts
@@ -114,7 +125,7 @@ async def import_commit_artifact(repo_id: UUID, commit_data: dict):
             commit_data["message"],
             commit_data["author"],
             commit_data["author_email"],
-            commit_data["committed_at"],
+            _parse_committed_at(commit_data["committed_at"]),
             commit_data.get("parents", []),
             changed_files_json,
             summary,
@@ -165,16 +176,13 @@ async def _upsert_chunk(repo_id: UUID, commit_sha: str, chunk: dict):
     sql = """
         INSERT INTO code_chunks (
             repo_id, file, symbol, kind, language, content,
-            content_hash, start_line, end_line, embedding, commit_sha
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::vector, $11)
-        ON CONFLICT (repo_id, file, content_hash) 
+            content_hash, start_line, end_line, embedding, commit_sha, indexed_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::vector, $11, $12)
+        ON CONFLICT (repo_id, file, symbol, start_line, end_line, content_hash)
         DO UPDATE SET
-            symbol = EXCLUDED.symbol,
             kind = EXCLUDED.kind,
             language = EXCLUDED.language,
             content = EXCLUDED.content,
-            start_line = EXCLUDED.start_line,
-            end_line = EXCLUDED.end_line,
             embedding = EXCLUDED.embedding,
             commit_sha = EXCLUDED.commit_sha,
             updated_at = now()
@@ -182,7 +190,14 @@ async def _upsert_chunk(repo_id: UUID, commit_sha: str, chunk: dict):
     
     # Format embedding as pgvector literal
     embedding_str = "[" + ",".join(str(x) for x in chunk["embedding"]) + "]"
-    
+
+    indexed_at_raw = chunk.get("indexed_at")
+    indexed_at = (
+        _parse_committed_at(indexed_at_raw)
+        if indexed_at_raw
+        else datetime.now(timezone.utc)
+    )
+
     async with pool().acquire() as conn:
         await conn.execute(
             sql,
@@ -197,6 +212,7 @@ async def _upsert_chunk(repo_id: UUID, commit_sha: str, chunk: dict):
             chunk.get("end_line", 0),
             embedding_str,
             commit_sha,
+            indexed_at,
         )
 
 

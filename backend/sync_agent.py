@@ -9,15 +9,20 @@ from .config import get_settings
 
 log = logging.getLogger(__name__)
 
-SYNC_AGENT_SYSTEM_PROMPT = """You are the PurnaOS LLM Sync Agent, a knowledge gatekeeper for a code repository.
-Your job is to analyze file edits/diffs and decide whether they are worth appending to the repository's knowledge base.
+SYNC_AGENT_SYSTEM_PROMPT = """You are the PurnaOS LLM Sync Agent, the gatekeeper of a code repository's knowledge base (its "memory").
 
-You must choose one of the following actions:
-1. "append": The change contains meaningful logic, API surface changes, new features, bug fixes with behavioral impact, configuration updates, architectural changes, or new dependencies with usage implications.
-2. "skip": The change is trivial and has no semantic value for understanding the repository. Examples: typos, whitespace changes, formatting, comments-only changes, generated lockfiles, test-only tweaks with no production impact, or reverts of prior skips.
-3. "defer": The change looks like an incomplete editing session (e.g. watch fired mid-typing), or a small change that is likely part of a larger in-progress feature that should settle before indexing.
+IMPORTANT: The diff you see is CUMULATIVE — it is everything that has changed in this file since the last time its contents were committed to memory. Changes you skip or defer stay staged and will reappear, combined with future edits, in later evaluations. Nothing is lost by saying no; memory only updates when you say "append".
 
-You must return a JSON object with the following fields:
+Your job: decide whether the ACCUMULATED change is now substantial enough to become memory. Only real logical or structural changes belong in memory — not tiny line edits or cosmetic refactors.
+
+Choose one action:
+1. "append": The accumulated change is SUBSTANTIAL — new features or functions, meaningful logic changes, API surface changes, bug fixes with behavioral impact, architectural changes, significant config changes, or new dependencies with usage implications. The bar is high: a reader of the knowledge base should genuinely need this to understand the repo.
+2. "skip": The accumulated change is still trivial or cosmetic — typos, whitespace, formatting, comments-only edits, renamed locals, tiny refactors with identical behavior, generated files. It can keep accumulating.
+3. "defer": The change looks mid-flight — incomplete code, syntax that suggests active typing, or a partial feature that should settle before indexing.
+
+When in doubt between append and skip, choose skip — the change is not lost, and you will re-evaluate it together with future edits.
+
+Return a JSON object:
 {
   "action": "append" | "skip" | "defer",
   "reason": "A concise, 1-sentence explanation of why you chose this action.",
@@ -53,7 +58,7 @@ Unified Diff:
 {diff}
 ```
 
-Please analyze this change and decide on the action (append, skip, or defer). Return a JSON object.
+This diff is the accumulated change since this file's contents were last committed to memory. Decide whether it is now substantial enough to append. Return a JSON object.
 """
     
     model = genai.GenerativeModel(
@@ -74,9 +79,10 @@ Please analyze this change and decide on the action (append, skip, or defer). Re
         text = resp.text.strip()
         result = json.loads(text)
         
-        # Validate keys
+        # Validate keys. Fail closed (defer): the change stays staged and is
+        # re-evaluated later, so memory never fills with unvetted edits.
         if "action" not in result or result["action"] not in ("append", "skip", "defer"):
-            result["action"] = "append"  # Default safe fallback
+            result["action"] = "defer"
         if "reason" not in result:
             result["reason"] = "Default fallback"
         if "update_understanding" not in result:
@@ -86,7 +92,7 @@ Please analyze this change and decide on the action (append, skip, or defer). Re
     except Exception as e:
         log.error(f"Error in sync agent decision: {e}")
         return {
-            "action": "append",  # Safe fallback
+            "action": "defer",  # Fail closed: change stays staged for re-evaluation
             "reason": f"Error running sync agent: {e}",
             "update_understanding": False
         }

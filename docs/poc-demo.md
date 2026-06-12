@@ -4,7 +4,43 @@ This document guides you through the live demonstration of the client-driven edi
 
 ---
 
-## 1. Setup
+## 0. Gemini API key (POC)
+
+For the POC, the Gemini key is set in `repo_knowledge/.env` as `GEMINI_API_KEY`. The backend and CLI pick it up automatically — no export or sidebar paste needed.
+
+Copy `.env.example` to `.env` and set your key if you haven't already:
+
+```bash
+cp .env.example .env
+# edit GEMINI_API_KEY=...
+```
+
+---
+
+## 1. Install the `purna` CLI (one-time)
+
+The `purna` command is not global until you install it from this repo. Use **Python 3.10–3.12** (3.14 is not supported yet by all dependencies).
+
+```bash
+cd /path/to/repo_knowledge
+python3.12 -m venv .venv          # use python3.12 or python3.11 if available
+source .venv/bin/activate
+pip install -r requirements.txt
+pip install -e .
+purna --help                      # should print command list
+```
+
+After activation, `purna` works from **any** directory (e.g. your `image-size-tool` repo).
+
+Without activating, call it by full path:
+
+```bash
+/path/to/repo_knowledge/.venv/bin/purna understand --purna-token purna_test_demo --gemini-key "$GEMINI_API_KEY"
+```
+
+---
+
+## 2. Setup
 
 ### Terminal 1 — Start Backend & Database
 Ensure Postgres is running and start the FastAPI server:
@@ -13,14 +49,14 @@ docker compose up -d db
 uvicorn backend.main:app --reload --port 8000
 ```
 
-### Terminal 2 — Onboard the Repository
-Navigate to any repository you want to use for the demo and run `purna understand`:
+### Terminal 2 — Onboard the Project
+Navigate to any project directory (git **not** required) and run `purna understand`:
 ```bash
 cd /path/to/your/repo
-purna understand --purna-token purna_test_demo --gemini-key $GEMINI_API_KEY
+purna understand --purna-token purna_test_demo
 ```
-*   **PurnaOS Token:** Enter `purna_test_demo` (this is the seeded fake test token).
-*   **Gemini API Key:** Paste your Gemini API key (Google AI Studio).
+*   **PurnaOS Token:** `purna_test_demo` (seeded fake test token).
+*   **Gemini API Key:** Loaded from `.env` automatically (optional: `--gemini-key` to override).
 *   This command will:
     1.  Validate the token and provision a workspace.
     2.  Create `.purnaOS/workspace.yaml` and `.purnaOS/state.json`.
@@ -30,7 +66,7 @@ purna understand --purna-token purna_test_demo --gemini-key $GEMINI_API_KEY
 
 ---
 
-## 2. The Demo Loop
+## 3. The Demo Loop
 
 ### Step 1: Open the Chat UI
 1.  Open your browser and navigate to `http://localhost:8000`.
@@ -71,7 +107,7 @@ purna understand --purna-token purna_test_demo --gemini-key $GEMINI_API_KEY
 
 ---
 
-## 3. Behind the Scenes
+## 4. Behind the Scenes
 
 1.  **Zero-Commit Triggers:** No git commit or push is required. The save event triggers the entire evaluation.
 2.  **Cost-Efficient Gatekeeper:** The LLM sync agent evaluates the unified diff first (very cheap). Chunking, embedding, and uploading only happen on `append` decisions, saving massive API costs and database space.

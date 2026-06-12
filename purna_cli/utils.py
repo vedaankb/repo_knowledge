@@ -111,11 +111,39 @@ def get_changed_files(sha: str, repo_root: Path) -> list[dict]:
     return files
 
 
-def get_file_content(file_path: str, sha: str, repo_root: Path) -> Optional[str]:
-    """Get file content at a specific commit"""
+def read_worktree_text(repo_root: Path, file_path: str) -> Optional[str]:
+    """Read a tracked file from the working tree as UTF-8 text; skip binary."""
+    full_path = repo_root / file_path
+    if not full_path.is_file():
+        return None
     try:
-        return git_command(["show", f"{sha}:{file_path}"], cwd=repo_root)
+        data = full_path.read_bytes()
+    except OSError:
+        return None
+    if b"\x00" in data:
+        return None
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+
+
+def get_file_content(file_path: str, sha: str, repo_root: Path) -> Optional[str]:
+    """Get file content at a specific commit; returns None for missing/binary files."""
+    try:
+        result = subprocess.run(
+            ["git", "show", f"{sha}:{file_path}"],
+            cwd=repo_root,
+            capture_output=True,
+            check=True,
+        )
     except subprocess.CalledProcessError:
+        return None
+    if b"\x00" in result.stdout:
+        return None
+    try:
+        return result.stdout.decode("utf-8")
+    except UnicodeDecodeError:
         return None
 
 

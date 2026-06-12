@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import re
 from dataclasses import asdict
+from datetime import datetime, timezone
 from typing import Optional
 from uuid import UUID
 
@@ -14,7 +15,7 @@ from .api_keys import require_current_gemini_key
 from .chat_memory import last_turn_index, persist_turn, retrieve_chat_context
 from .config import get_settings
 from .embeddings import _ensure_configured
-from .retriever import CodeHit, SkillHit, retrieve
+from .retriever import CodeHit, SkillHit, retrieve, retrieve_recent_chunks
 
 
 REFUSAL_TEXT = (
@@ -47,6 +48,12 @@ CHAT MEMORY:
 - PRIOR CONVERSATION lists past messages tagged [turn N · role]. Treat turn 1
   as the chat anchor. Refer back to specific turns when relevant.
 - Don't invent earlier turns not present.
+
+TEMPORAL AWARENESS:
+- Code chunks carry "(first indexed: ...)" / "(last updated: ...)" timestamps
+  and a CURRENT TIME line is provided. Use them for "what is new / what
+  changed recently" questions: newer timestamps = recently added knowledge,
+  the oldest shared timestamp = the original baseline index.
 """
 
 SYSTEM_PROMPT = """You are a strict repository-grounded assistant for a single GitHub repo.
@@ -87,15 +94,43 @@ ANSWER STYLE:
 - For "why was X changed / when was bug Y fixed" questions: lean on PR/feature notes.
 - If multiple sources disagree, say so and cite both.
 - Be concise. Use bullet points and fenced code blocks for commands.
+
+TEMPORAL AWARENESS (what is new vs old):
+- Every code chunk header carries "(first indexed: ...)" and, when re-indexed,
+  "(last updated: ...)" timestamps. The CURRENT TIME line tells you "now".
+- For questions like "what is new", "what changed recently", "what was added
+  today", "what is the latest feature": compare chunk timestamps. Chunks whose
+  first-indexed or last-updated time is close to CURRENT TIME (and notably
+  later than the bulk of other chunks) are the NEW knowledge; chunks sharing
+  the oldest common timestamp are the original baseline index.
+- When answering temporal questions, state the timestamp evidence explicitly,
+  e.g. "calculate_discount was indexed at 2026-06-12 11:40 UTC, after the
+  baseline index at 2026-06-12 05:56 UTC, so it is a recent addition."
+- If timestamps cannot distinguish new from old (all identical), say so rather
+  than guessing.
 """
+
+
+def _format_ts(ts: Optional[str]) -> Optional[str]:
+    """Compact ISO timestamp for prompt headers: 2026-06-12 11:30 UTC."""
+    if not ts:
+        return None
+    try:
+        dt = datetime.fromisoformat(ts)
+        if dt.tzinfo:
+            dt = dt.astimezone(timezone.utc)
+        return dt.strftime("%Y-%m-%d %H:%M UTC")
+    except ValueError:
+        return ts
 
 
 def _format_code_context(hits: list[CodeHit]) -> str:
     if not hits:
         return "(no code chunks)"
+    # Newest indexed timestamp marks the most recent knowledge in this context.
     lines: list[str] = []
-    for h in hits:
-        header = f"[{h.file}"
+    for i, h in enumerate(hits, start=1):
+        header = f"[chunk {i}] [{h.file}"
         if h.symbol:
             header += f":{h.symbol}"
         if h.start_line and h.end_line:
@@ -103,6 +138,12 @@ def _format_code_context(hits: list[CodeHit]) -> str:
         if h.commit_sha:
             header += f" @{h.commit_sha[:7]}"
         header += f"]  (score={h.score:.2f})"
+        first_seen = _format_ts(h.indexed_at)
+        last_updated = _format_ts(h.updated_at)
+        if first_seen:
+            header += f"  (first indexed: {first_seen})"
+        if last_updated and last_updated != first_seen:
+            header += f"  (last updated: {last_updated})"
         lines.append(header)
         lines.append(h.content)
         lines.append("---")
@@ -232,11 +273,13 @@ def _build_prompt(
         "invent earlier turns that aren't shown."
     )
     prefs_block = _format_preferences(user_preferences)
+    now_line = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     return (
         f"{system}\n\n"
         f"{prefs_block}"
         f"{mode_block}"
         f"{scope_block}"
+        f"=== CURRENT TIME ===\n{now_line}\n\n"
         f"=== TOPICS DISCUSSED IN THIS CHAT (rolling memory) ===\n{topics_line}\n\n"
         f"=== PRIOR CONVERSATION (this chat only) ===\n"
         f"{history_note}\n\n"
@@ -379,6 +422,30 @@ def extract_topics(history: Optional[list[dict]], cap: int = 20) -> list[str]:
     return topics
 
 
+_TEMPORAL_RE = re.compile(
+    r"\b(what'?s new|new(est|ly)?|recent(ly)?|latest|last (change|edit|update)|"
+    r"just (added|changed|edited|wrote)|today|updated?|added)\b",
+    re.IGNORECASE,
+)
+
+
+def is_temporal_question(question: str) -> bool:
+    """Heuristic: does the question ask about recency / what changed?"""
+    return bool(_TEMPORAL_RE.search(question))
+
+
+def _merge_recent_hits(code: list[CodeHit], recent: list[CodeHit]) -> list[CodeHit]:
+    """Append recent chunks that semantic retrieval missed (dedupe by identity)."""
+    seen = {(h.file, h.symbol, h.start_line, h.end_line) for h in code}
+    merged = list(code)
+    for h in recent:
+        key = (h.file, h.symbol, h.start_line, h.end_line)
+        if key not in seen:
+            seen.add(key)
+            merged.append(h)
+    return merged
+
+
 def build_retrieval_query(question: str, history: Optional[list[dict]]) -> str:
     """Bias retrieval toward the prior topic for follow-up questions.
 
@@ -419,6 +486,9 @@ async def preview(
     code, skills = await retrieve(
         repo_id, retrieval_query, commit_sha=commit_sha, file_paths=file_paths
     )
+    if is_temporal_question(question) and not commit_sha and not file_paths:
+        recent = await retrieve_recent_chunks(repo_id)
+        code = _merge_recent_hits(code, recent)
     last_idx = await last_turn_index(chat_id)
     return {
         "code": [asdict(c) for c in code],
@@ -447,6 +517,9 @@ async def answer(
     code, skills = await retrieve(
         repo_id, retrieval_query, commit_sha=commit_sha, file_paths=file_paths
     )
+    if is_temporal_question(question) and not commit_sha and not file_paths:
+        recent = await retrieve_recent_chunks(repo_id)
+        code = _merge_recent_hits(code, recent)
 
     # In strict mode, refuse early when retrieval is empty.
     # In plan mode, proceed: the model can still reason from general knowledge.

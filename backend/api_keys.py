@@ -1,16 +1,14 @@
 """Per-request Gemini API key resolution.
 
-The user pastes their own Gemini key into the sidebar; the browser ships it
-on every request as `X-Gemini-Key`. A FastAPI middleware copies the header
-into this ContextVar. Background tasks (initial index, zip index, scheduler)
-explicitly set this ContextVar from the per-repo snapshot saved at register
-time. There is NO `.env` fallback by design — each user brings their own key
-so we never burn a shared quota.
+Priority: X-Gemini-Key header → per-repo stored key → GEMINI_API_KEY in .env
+(POC default; per-user keys in the UI later).
 """
 from __future__ import annotations
 
 from contextvars import ContextVar
 from typing import Optional
+
+from .config import get_settings
 
 _current_key: ContextVar[Optional[str]] = ContextVar(
     "current_gemini_key", default=None
@@ -28,13 +26,13 @@ def set_current_gemini_key(key: Optional[str]) -> None:
     _current_key.set((key or "").strip() or None)
 
 
-def get_current_gemini_key() -> str:
-    """Return the active Gemini key, or empty string if not configured.
+def get_env_gemini_key() -> str:
+    return (get_settings().gemini_api_key or "").strip()
 
-    Caller is responsible for raising a clear error if empty AND a Gemini
-    API call is actually needed.
-    """
-    return (_current_key.get() or "").strip()
+
+def get_current_gemini_key() -> str:
+    """Return the active Gemini key, or empty string if not configured."""
+    return (_current_key.get() or get_env_gemini_key() or "").strip()
 
 
 class KeyNotConfiguredError(RuntimeError):

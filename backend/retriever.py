@@ -23,6 +23,8 @@ class CodeHit:
     end_line: Optional[int]
     commit_sha: Optional[str]
     score: float
+    indexed_at: Optional[str] = None
+    updated_at: Optional[str] = None
 
 
 @dataclass
@@ -59,6 +61,7 @@ async def retrieve(
 
     code_sql = f"""
     SELECT file, symbol, language, content, start_line, end_line, commit_sha,
+           indexed_at, updated_at,
            1 - (embedding <=> $2::vector) AS score
     FROM code_chunks
     WHERE {' AND '.join(code_where)}
@@ -87,6 +90,8 @@ async def retrieve(
             end_line=r["end_line"],
             commit_sha=r["commit_sha"],
             score=float(r["score"]),
+            indexed_at=r["indexed_at"].isoformat() if r["indexed_at"] else None,
+            updated_at=r["updated_at"].isoformat() if r["updated_at"] else None,
         )
         for r in code_rows
         if float(r["score"]) >= settings.min_retrieval_score
@@ -105,3 +110,32 @@ async def retrieve(
         if float(r["score"]) >= settings.min_retrieval_score
     ]
     return code, skills
+
+
+async def retrieve_recent_chunks(repo_id: UUID, limit: int = 8) -> list[CodeHit]:
+    """Most recently indexed/updated chunks, for 'what is new' questions."""
+    sql = """
+    SELECT file, symbol, language, content, start_line, end_line, commit_sha,
+           indexed_at, updated_at
+    FROM code_chunks
+    WHERE repo_id = $1
+    ORDER BY GREATEST(indexed_at, updated_at) DESC
+    LIMIT $2
+    """
+    async with pool().acquire() as conn:
+        rows = await conn.fetch(sql, repo_id, limit)
+    return [
+        CodeHit(
+            file=r["file"],
+            symbol=r["symbol"],
+            language=r["language"],
+            content=r["content"],
+            start_line=r["start_line"],
+            end_line=r["end_line"],
+            commit_sha=r["commit_sha"],
+            score=0.0,
+            indexed_at=r["indexed_at"].isoformat() if r["indexed_at"] else None,
+            updated_at=r["updated_at"].isoformat() if r["updated_at"] else None,
+        )
+        for r in rows
+    ]

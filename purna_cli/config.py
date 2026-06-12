@@ -83,14 +83,22 @@ class PurnaConfig:
             gitignore_path.write_text("local/\n")
 
 
-def find_repo_root(start_path: Optional[Path] = None) -> Optional[Path]:
-    """Find git repository root by looking for .git directory"""
+def find_project_root(start_path: Optional[Path] = None) -> Path:
+    """
+    Resolve the project root for PurnaOS.
+    Uses the nearest ancestor with `.purnaOS/`, otherwise the current working directory.
+    No git required.
+    """
     if start_path is None:
         start_path = Path.cwd()
-    
+
     current = start_path.resolve()
-    while current != current.parent:
-        if (current / ".git").exists():
-            return current
-        current = current.parent
-    return None
+    for candidate in [current, *current.parents]:
+        if (candidate / ".purnaOS").exists():
+            return candidate
+    return current
+
+
+def find_repo_root(start_path: Optional[Path] = None) -> Optional[Path]:
+    """Backward-compatible alias for find_project_root."""
+    return find_project_root(start_path)

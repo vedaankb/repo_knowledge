@@ -47,7 +47,13 @@ from .indexer import (
 )
 from .knowledge_importer import index_from_knowledge_repo, sync_knowledge_repo, import_commit_artifact, _upsert_chunk, apply_deletions
 from .scheduler import build_scheduler, sync_repo
-from .purna_control import validate_token, provision_workspace, log_decision, get_recent_decisions
+from .purna_control import (
+    validate_token,
+    provision_workspace,
+    log_decision,
+    get_recent_decisions,
+    parse_workspace_config,
+)
 
 MAX_ZIP_BYTES = 100 * 1024 * 1024
 MAX_ZIP_ENTRIES = 20_000
@@ -82,12 +88,10 @@ app.add_middleware(
 
 @app.middleware("http")
 async def _gemini_key_middleware(request: Request, call_next):
-    """Read the user's Gemini key from the X-Gemini-Key header and stash it in
-    a ContextVar that every downstream embedding / chat call reads from.
+    """Stash Gemini key: X-Gemini-Key header, else GEMINI_API_KEY from .env (POC)."""
+    from .api_keys import get_env_gemini_key
 
-    There is NO .env fallback — each user brings their own key.
-    """
-    key = request.headers.get("x-gemini-key")
+    key = request.headers.get("x-gemini-key") or get_env_gemini_key()
     if key:
         set_current_gemini_key(key)
     return await call_next(request)
@@ -280,6 +284,15 @@ async def purna_understand(req: PurnaUnderstandRequest) -> dict:
     }
 
 
+async def _ensure_repo_gemini_key(repo_id: UUID) -> None:
+    """Use per-repo stored key when CLI requests omit X-Gemini-Key."""
+    if get_current_gemini_key():
+        return
+    key = await get_repo_gemini_token(repo_id)
+    if key:
+        set_current_gemini_key(key)
+
+
 @app.post("/api/purna/artifacts")
 async def purna_artifacts(req: PurnaArtifactsRequest) -> dict:
     """
@@ -304,7 +317,8 @@ async def purna_artifacts(req: PurnaArtifactsRequest) -> dict:
         
     repo_id = ws["repo_id"]
     knowledge_path = Path(ws["knowledge_path"])
-    
+    await _ensure_repo_gemini_key(repo_id)
+
     # 3. Save to local filesystem
     (knowledge_path / "commits").mkdir(parents=True, exist_ok=True)
     (knowledge_path / "deleted").mkdir(parents=True, exist_ok=True)
@@ -381,16 +395,18 @@ async def purna_event(req: PurnaEventRequest) -> dict:
     # 2. Verify workspace and get current understanding
     async with pool().acquire() as conn:
         ws = await conn.fetchrow(
-            "SELECT org_id, config FROM workspaces WHERE id = $1",
+            "SELECT org_id, repo_id, config FROM workspaces WHERE id = $1",
             req.workspace_id
         )
     if not ws:
         raise HTTPException(status_code=404, detail="Workspace not found")
     if ws["org_id"] != org_id:
         raise HTTPException(status_code=403, detail="Workspace does not belong to this organization")
-        
-    config = ws["config"] or {}
-    understanding = config.get("understanding", "Code repository workspace")
+    if ws["repo_id"]:
+        await _ensure_repo_gemini_key(ws["repo_id"])
+
+    ws_config = parse_workspace_config(ws["config"])
+    understanding = ws_config.get("understanding", "Code repository workspace")
     
     # 3. Run sync agent decision
     from .sync_agent import decide_sync_event

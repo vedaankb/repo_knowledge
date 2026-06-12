@@ -11,6 +11,21 @@ from .db import pool
 log = logging.getLogger(__name__)
 
 
+def parse_workspace_config(raw) -> dict:
+    """asyncpg returns JSONB columns as JSON strings — normalize to dict."""
+    if raw is None:
+        return {}
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str):
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return {"understanding": raw}
+        return parsed if isinstance(parsed, dict) else {"understanding": str(parsed)}
+    return {}
+
+
 async def validate_token(token: str) -> UUID:
     """
     Validate a PurnaOS token and return its organization ID.
